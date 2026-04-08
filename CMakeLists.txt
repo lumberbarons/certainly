@@ -13,3 +13,4 @@ add_subdirectory(bearssl)
 
 # Examples
 add_subdirectory(examples/hello_toolbox)
+add_subdirectory(examples/hello_ot)
