@@ -8,5 +8,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Compiler warnings
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
+# BearSSL
+add_subdirectory(bearssl)
+
 # Examples
 add_subdirectory(examples/hello_toolbox)
