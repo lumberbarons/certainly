@@ -98,12 +98,11 @@ static OSStatus ot_setup_endpoint(OTTransport *t)
     config = OTCreateConfiguration("tcp");
     if (config == NULL) return kOTOutOfMemoryErr;
 
-    t->endpoint = OTOpenEndpointInContext(
+    t->endpoint = OTOpenEndpoint(
         config,
         0,              /* flags — 0 means default (async capable) */
         NULL,           /* endpoint info — we don't need it */
-        &err,
-        NULL            /* context — use default */
+        &err
     );
     if (err != noErr) return err;
 
@@ -149,9 +148,9 @@ static void ot_start_dns(OTTransport *t, const char *host)
     InetSvcRef inetSvc;
     OSStatus   err;
 
-    inetSvc = OTOpenInternetServicesInContext(
+    inetSvc = OTOpenInternetServices(
         kDefaultInternetServicesPath,
-        0, &err, NULL
+        0, &err
     );
     if (err != noErr) {
         t->lastError = err;

@@ -21,6 +21,7 @@
 #include <Events.h>
 #include <OpenTransport.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ot_transport.h"
 
@@ -64,7 +65,7 @@ int main(void)
     InitCursor();
 
     /* Initialize Open Transport — must do this before any OT calls */
-    InitOpenTransportInContext(kInitOTForApplicationMask, NULL);
+    InitOpenTransport();
 
     window = NewWindow(NULL, &windowRect, "\pOT Test", true,
                        documentProc, (WindowPtr)-1, false, 0);
@@ -131,7 +132,7 @@ wait_quit:
     } while (event.what != mouseDown);
 
     ot_transport_destroy(transport);
-    CloseOpenTransportInContext();
+    CloseOpenTransport();
     DisposeWindow(window);
     return 0;
 }

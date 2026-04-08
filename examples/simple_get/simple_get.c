@@ -18,6 +18,7 @@
 #include <OpenTransport.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include "certainly.h"
 
@@ -72,7 +73,7 @@ int main(void)
     InitCursor();
 
     /* Initialize Open Transport */
-    InitOpenTransportInContext(kInitOTForApplicationMask, NULL);
+    InitOpenTransport();
 
     /* Initialize Certainly */
     MacTLS_Init();
@@ -188,7 +189,7 @@ wait_quit:
     /* Cleanup */
     if (ctx) MacTLS_Close(ctx);
     MacTLS_Shutdown();
-    CloseOpenTransportInContext();
+    CloseOpenTransport();
     DisposeWindow(window);
     return 0;
 }

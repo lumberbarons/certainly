@@ -14,6 +14,7 @@
 #   src/x509/    — Certificate chain validation
 
 file(GLOB_RECURSE BEARSSL_SOURCES
+    src/aead/*.c
     src/codec/*.c
     src/ec/*.c
     src/hash/*.c

@@ -27,6 +27,7 @@ target_include_directories(certainly
 
 target_link_libraries(certainly
     PRIVATE bearssl
+    PUBLIC  OpenTransportLib OpenTransportAppPPC OpenTptInternetLib OpenTptInetPPC
 )
 
 # Examples

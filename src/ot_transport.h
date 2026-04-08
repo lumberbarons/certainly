@@ -20,6 +20,7 @@
 #include <OpenTransport.h>
 #include <OpenTptInternet.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 
 typedef enum {
