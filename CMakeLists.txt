@@ -32,3 +32,4 @@ target_link_libraries(certainly
 # Examples
 add_subdirectory(examples/hello_toolbox)
 add_subdirectory(examples/hello_ot)
+add_subdirectory(examples/simple_get)
