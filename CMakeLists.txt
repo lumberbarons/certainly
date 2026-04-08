@@ -11,6 +11,24 @@ add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 # BearSSL
 add_subdirectory(bearssl)
 
+# Certainly — the TLS library
+add_library(certainly STATIC
+    src/certainly.c
+    src/ot_transport.c
+    src/entropy.c
+    src/ca_roots.c
+)
+
+target_include_directories(certainly
+    PUBLIC  include          # certainly.h — consumers see this
+    PRIVATE src              # internal headers
+    PRIVATE bearssl/inc      # BearSSL headers
+)
+
+target_link_libraries(certainly
+    PRIVATE bearssl
+)
+
 # Examples
 add_subdirectory(examples/hello_toolbox)
 add_subdirectory(examples/hello_ot)

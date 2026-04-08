@@ -1,0 +1,73 @@
+/*
+ * certainly_internal.h — internal struct definitions
+ *
+ * These are the actual contents of the opaque MacTLS_Context
+ * and MacTLS_Config types. Application code never sees this file.
+ */
+
+#ifndef CERTAINLY_INTERNAL_H
+#define CERTAINLY_INTERNAL_H
+
+#include "certainly.h"
+#include "ot_transport.h"
+#include "entropy.h"
+#include "ca_roots.h"
+
+#include <bearssl.h>
+
+/*
+ * I/O buffer size for BearSSL.
+ *
+ * BearSSL needs a buffer to hold TLS records during processing.
+ * A TLS record can be up to 16KB + overhead. We use a single
+ * buffer (half-duplex mode) — BearSSL alternates between reading
+ * and writing in this buffer. Full-duplex would need two buffers
+ * but uses more RAM.
+ *
+ * For a REST client doing request-then-response, half-duplex is
+ * fine — you're never sending and receiving simultaneously.
+ */
+#define CERTAINLY_IOBUF_SIZE  (16384 + 325)  /* max TLS record + overhead */
+
+struct MacTLS_Context {
+    /* Connection state */
+    MacTLS_State    state;
+    MacTLS_Error    error;
+
+    /* Open Transport TCP connection */
+    OTTransport    *transport;
+
+    /* BearSSL client context — contains the TLS state machine */
+    br_ssl_client_context   sc;
+
+    /*
+     * BearSSL X.509 minimal validator — walks the certificate chain
+     * and checks each signature against our trust anchors.
+     * "Minimal" means: it validates the chain but doesn't support
+     * CRL/OCSP revocation checking. Fine for our use case.
+     */
+    br_x509_minimal_context xc;
+
+    /* I/O buffer — BearSSL reads/writes TLS records here */
+    unsigned char   iobuf[CERTAINLY_IOBUF_SIZE];
+
+    /* Hostname — kept for SNI and cert validation */
+    char            host[256];
+
+    /* Config reference (NULL = use defaults) */
+    const MacTLS_Config *config;
+};
+
+struct MacTLS_Config {
+    /*
+     * Custom trust anchors. If non-NULL, these are used INSTEAD of
+     * the compiled-in defaults. We store raw DER cert data and
+     * decode it when creating a connection.
+     */
+    const br_x509_trust_anchor *custom_tas;
+    size_t                      custom_tas_count;
+
+    /* TODO: add custom CA DER storage when MacTLS_ConfigAddCA is implemented */
+};
+
+#endif /* CERTAINLY_INTERNAL_H */
