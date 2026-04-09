@@ -242,6 +242,18 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
             if (n > 0) {
                 br_ssl_engine_sendrec_ack(&ctx->sc.eng, n);
             } else if (n < 0) {
+                /*
+                 * Send failed. If the peer already closed the connection
+                 * (orderly release or disconnect), this is expected —
+                 * e.g., server sent "Connection: close" and shut down.
+                 * Treat as closed, not as an error.
+                 */
+                if (ctx->transport->ordRelReceived ||
+                    ctx->transport->disconnectReceived) {
+                    br_ssl_engine_close(&ctx->sc.eng);
+                    ctx->state = kMacTLS_Closed;
+                    return ctx->state;
+                }
                 ctx->state = kMacTLS_Error;
                 ctx->error = kMacTLS_ErrWrite;
                 return ctx->state;
@@ -257,6 +269,13 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
             if (n > 0) {
                 br_ssl_engine_recvrec_ack(&ctx->sc.eng, n);
             } else if (n < 0) {
+                /* Recv failed — if peer closed, treat as normal close */
+                if (ctx->transport->ordRelReceived ||
+                    ctx->transport->disconnectReceived) {
+                    br_ssl_engine_close(&ctx->sc.eng);
+                    ctx->state = kMacTLS_Closed;
+                    return ctx->state;
+                }
                 ctx->state = kMacTLS_Error;
                 ctx->error = kMacTLS_ErrRead;
                 return ctx->state;
