@@ -31,12 +31,4 @@ void entropy_seed_engine(br_ssl_engine_context *eng);
  */
 void entropy_add(const void *data, size_t len);
 
-/*
- * BearSSL seeder function — matches the br_prng_seeder signature.
- * Can be passed to br_ssl_engine_set_default_rsagen() etc.
- * Returns 1 on success, 0 on failure.
- */
-int entropy_seeder(const br_prng_class **ctx, const void *params,
-                   const void *seed, size_t seed_len);
-
 #endif /* CERTAINLY_ENTROPY_H */

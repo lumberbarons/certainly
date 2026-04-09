@@ -68,6 +68,20 @@ MacTLS_Error MacTLS_Init(void);
 void         MacTLS_Shutdown(void);
 
 /* ── Connection lifecycle ── */
+
+/*
+ * Create a TLS connection context and begin connecting.
+ *
+ * Returns NULL only on allocation failure. On other errors (invalid hostname,
+ * transport failure), returns a non-NULL context in kMacTLS_Error state.
+ * ALWAYS check MacTLS_GetState() after Create — a NULL check alone is not
+ * sufficient:
+ *
+ *   ctx = MacTLS_Create("example.com", 443);
+ *   if (ctx == NULL || MacTLS_GetState(ctx) == kMacTLS_Error) {
+ *       // handle error (call MacTLS_Close(ctx) if non-NULL)
+ *   }
+ */
 MacTLS_Context *MacTLS_Create(const char *host, uint16_t port);
 MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
                                         MacTLS_Config *cfg);

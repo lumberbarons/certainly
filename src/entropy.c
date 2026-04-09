@@ -164,8 +164,17 @@ static void harvest_timer_jitter(void)
 
     pool_mix(jitter_pool, sizeof(jitter_pool));
 
-    /* Overwrite local buffer with zeros — don't leave entropy on stack */
-    memset(jitter_pool, 0, sizeof(jitter_pool));
+    /*
+     * Overwrite local buffer with zeros — don't leave entropy on stack.
+     * Must use volatile to prevent the compiler from optimizing this away.
+     * Without volatile, the compiler sees "buffer is zeroed then never read"
+     * and removes the zeroing entirely.
+     */
+    {
+        volatile uint8_t *p = (volatile uint8_t *)jitter_pool;
+        size_t i;
+        for (i = 0; i < sizeof(jitter_pool); i++) p[i] = 0;
+    }
 }
 
 void entropy_init(void)
@@ -227,8 +236,16 @@ void entropy_seed_engine(br_ssl_engine_context *eng)
      */
     br_ssl_engine_inject_entropy(eng, g_pool, POOL_SIZE);
 
-    /* Zero pool copy after injection — defense in depth */
-    memset(g_pool, 0, POOL_SIZE);
+    /*
+     * Do NOT zero the pool here. The pool accumulates entropy over time —
+     * each gather_sources() call XORs new data on top of existing data,
+     * making subsequent connections STRONGER. Zeroing would discard the
+     * one-time entropy from entropy_init() (ReadLocation, initial mouse
+     * position, startup jitter) and weaken the seed for the 2nd+ connection.
+     *
+     * The pool itself is not secret material — the real secret is inside
+     * BearSSL's HMAC_DRBG after injection. The pool is just a staging area.
+     */
 }
 
 void entropy_add(const void *data, size_t len)

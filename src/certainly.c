@@ -133,8 +133,11 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
     ctx->state  = kMacTLS_Connecting;
     ctx->config = cfg;
 
-    /* Reject hostnames that would be truncated — truncated SNI could match wrong cert */
-    if (strlen(host) >= sizeof(ctx->host)) {
+    /*
+     * Reject invalid hostnames. DNS names are limited to 253 chars (RFC 1035).
+     * Also reject anything that would overflow our 256-byte buffer.
+     */
+    if (strlen(host) > 253 || strlen(host) >= sizeof(ctx->host)) {
         ctx->state = kMacTLS_Error;
         ctx->error = kMacTLS_ErrDNS;  /* closest error code */
         return ctx;
@@ -316,8 +319,11 @@ void MacTLS_Close(MacTLS_Context *ctx)
         {
             int flush_attempts;
             for (flush_attempts = 0; flush_attempts < 10; flush_attempts++) {
-                MacTLS_Pump(ctx);
+                MacTLS_State pump_state = MacTLS_Pump(ctx);
                 if (br_ssl_engine_current_state(&ctx->sc.eng) == BR_SSL_CLOSED)
+                    break;
+                /* Stop if pump hit an error — no point retrying */
+                if (pump_state == kMacTLS_Error)
                     break;
             }
         }
