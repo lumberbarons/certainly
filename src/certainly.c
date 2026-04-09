@@ -198,6 +198,30 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
             ctx->state = kMacTLS_Connecting;
             return ctx->state;
         }
+
+        /*
+         * TCP just connected — start the handshake timer.
+         * Without this timeout, a malicious server could complete the TCP
+         * handshake but never send a TLS ServerHello, stalling us forever
+         * in kMacTLS_Handshaking. An attacker in a MITM position can do
+         * this trivially: accept the SYN, complete the three-way handshake,
+         * then go silent. Our app would spin in the pump loop indefinitely.
+         */
+        if (ctx->state == kMacTLS_Connecting && tstate == kOTTransport_Connected) {
+            ctx->handshake_start_ticks = (uint32_t)TickCount();
+        }
+    }
+
+    /*
+     * Handshake timeout check — 30 seconds.
+     * This protects against a MITM that completes TCP but stalls TLS.
+     */
+    if (ctx->state == kMacTLS_Handshaking) {
+        if ((uint32_t)TickCount() - ctx->handshake_start_ticks > 30 * 60) {
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrHandshake;
+            return ctx->state;
+        }
     }
 
     /*

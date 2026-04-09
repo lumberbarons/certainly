@@ -54,6 +54,9 @@ struct MacTLS_Context {
     /* Hostname — kept for SNI and cert validation */
     char            host[256];
 
+    /* Tick count when TLS handshake started, for timeout */
+    uint32_t        handshake_start_ticks;
+
     /* Config reference (NULL = use defaults) */
     const MacTLS_Config *config;
 };
