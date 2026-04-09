@@ -49,6 +49,9 @@ typedef struct {
     OTTransportState state;
     volatile OSStatus lastError;
 
+    /* Connection start time for timeout tracking (in ticks) */
+    uint32_t        connect_start_ticks;
+
     /* Flags set by the notifier callback (runs at interrupt time) */
     volatile bool   connectComplete;
     volatile bool   dataAvailable;
@@ -56,6 +59,9 @@ typedef struct {
     volatile bool   disconnectReceived;
     volatile bool   dnsComplete;
 } OTTransport;
+
+/* 30 seconds at 60 ticks/sec */
+#define OT_CONNECT_TIMEOUT_TICKS (30 * 60)
 
 /*
  * Create a transport and begin connecting to host:port.

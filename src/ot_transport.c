@@ -21,6 +21,7 @@
 #include "ot_transport.h"
 #include <string.h>
 #include <Memory.h>  /* NewPtrClear, DisposePtr */
+#include <Events.h>  /* TickCount */
 
 /* Forward declarations */
 static pascal void ot_notifier(void *context, OTEventCode event,
@@ -185,6 +186,9 @@ OTTransport *ot_transport_create(const char *host, uint16_t port)
         return t;
     }
 
+    /* Record connection start time for timeout tracking */
+    t->connect_start_ticks = (uint32_t)TickCount();
+
     /* Start DNS resolution */
     t->state = kOTTransport_ResolvingDNS;
     ot_start_dns(t, host);
@@ -197,6 +201,11 @@ OTTransportState ot_transport_pump(OTTransport *t)
     switch (t->state) {
 
     case kOTTransport_ResolvingDNS:
+        if ((uint32_t)TickCount() - t->connect_start_ticks > OT_CONNECT_TIMEOUT_TICKS) {
+            t->lastError = -3259;  /* kETIMEDOUTErr */
+            t->state = kOTTransport_Error;
+            break;
+        }
         if (t->disconnectReceived) {
             t->state = kOTTransport_Error;
             break;
@@ -242,6 +251,11 @@ OTTransportState ot_transport_pump(OTTransport *t)
         break;
 
     case kOTTransport_Connecting:
+        if ((uint32_t)TickCount() - t->connect_start_ticks > OT_CONNECT_TIMEOUT_TICKS) {
+            t->lastError = -3259;  /* kETIMEDOUTErr */
+            t->state = kOTTransport_Error;
+            break;
+        }
         if (t->disconnectReceived) {
             t->state = kOTTransport_Error;
             break;

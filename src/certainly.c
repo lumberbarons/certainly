@@ -293,8 +293,15 @@ void MacTLS_Close(MacTLS_Context *ctx)
         br_ssl_engine_close(&ctx->sc.eng);
         ctx->state = kMacTLS_Closing;
 
-        /* Pump once to flush the close_notify */
-        MacTLS_Pump(ctx);
+        /* Pump up to 10 times to flush the close_notify */
+        {
+            int flush_attempts;
+            for (flush_attempts = 0; flush_attempts < 10; flush_attempts++) {
+                MacTLS_Pump(ctx);
+                if (br_ssl_engine_current_state(&ctx->sc.eng) == BR_SSL_CLOSED)
+                    break;
+            }
+        }
     }
 
     /* Close the TCP connection */
