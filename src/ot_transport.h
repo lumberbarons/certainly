@@ -43,7 +43,7 @@ typedef struct {
 
     /* State tracking */
     OTTransportState state;
-    OSStatus        lastError;
+    volatile OSStatus lastError;
 
     /* Flags set by the notifier callback (runs at interrupt time) */
     volatile bool   connectComplete;

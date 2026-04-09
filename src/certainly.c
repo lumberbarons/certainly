@@ -49,15 +49,19 @@ static void setup_bearssl(MacTLS_Context *ctx)
 {
     /*
      * Cipher suites, in preference order.
-     * These are the most commonly supported modern suites:
+     *
+     * ChaCha20-Poly1305 is listed first because PPC G3/G4 lacks AES hardware
+     * acceleration, making ChaCha20-Poly1305 significantly faster than AES-GCM
+     * on this platform. ECDSA is interleaved before RSA because most modern
+     * servers use ECDSA certificates.
      */
     static const uint16_t suites[] = {
-        BR_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-        BR_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        BR_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
         BR_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
         BR_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        BR_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
         BR_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-        BR_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        BR_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
     };
 
     const br_x509_trust_anchor *tas;
@@ -83,6 +87,9 @@ static void setup_bearssl(MacTLS_Context *ctx)
     /* Override with our preferred cipher suites */
     br_ssl_engine_set_suites(&ctx->sc.eng, suites,
                              sizeof(suites) / sizeof(suites[0]));
+
+    /* Pin to TLS 1.2 only — prevent downgrade to TLS 1.0/1.1 */
+    br_ssl_engine_set_versions(&ctx->sc.eng, BR_TLS12, BR_TLS12);
 
     /*
      * Set the I/O buffer. BearSSL uses this to assemble and
@@ -125,6 +132,13 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
 
     ctx->state  = kMacTLS_Connecting;
     ctx->config = cfg;
+
+    /* Reject hostnames that would be truncated — truncated SNI could match wrong cert */
+    if (strlen(host) >= sizeof(ctx->host)) {
+        ctx->state = kMacTLS_Error;
+        ctx->error = kMacTLS_ErrDNS;  /* closest error code */
+        return ctx;
+    }
 
     /* Save hostname for SNI */
     strncpy(ctx->host, host, sizeof(ctx->host) - 1);
