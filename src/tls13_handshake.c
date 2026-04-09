@@ -24,6 +24,22 @@ static void put_u16(unsigned char *p, uint16_t v)
 }
 
 /*
+ * Read a 16-bit big-endian value from a buffer.
+ */
+static uint16_t get_u16(const unsigned char *p)
+{
+    return (uint16_t)((p[0] << 8) | p[1]);
+}
+
+/*
+ * Read a 24-bit big-endian value from a buffer.
+ */
+static uint32_t get_u24(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
+}
+
+/*
  * Write a 24-bit big-endian value into a buffer.
  * Used for handshake message lengths (3-byte length field).
  */
@@ -32,6 +48,17 @@ static void put_u24(unsigned char *p, uint32_t v)
     p[0] = (unsigned char)(v >> 16);
     p[1] = (unsigned char)(v >> 8);
     p[2] = (unsigned char)(v);
+}
+
+/*
+ * Securely zero sensitive memory.
+ * Uses volatile pointer to prevent compiler from optimizing away the wipe.
+ */
+static void secure_wipe(void *ptr, size_t len)
+{
+    volatile unsigned char *p = (volatile unsigned char *)ptr;
+    size_t i;
+    for (i = 0; i < len; i++) p[i] = 0;
 }
 
 /* ── Transcript Hashing ── */
@@ -152,11 +179,7 @@ static int tls13_generate_x25519_keypair(tls13_hs_ctx *hs,
     memcpy(hs->ecdhe_public, kbuf_pub, 32);
 
     /* Wipe the temporary private key buffer */
-    {
-        volatile unsigned char *p = (volatile unsigned char *)kbuf_priv;
-        size_t i;
-        for (i = 0; i < sizeof(kbuf_priv); i++) p[i] = 0;
-    }
+    secure_wipe(kbuf_priv, sizeof(kbuf_priv));
 
     return 0;
 }
@@ -530,6 +553,525 @@ static size_t tls13_build_ccs(unsigned char *buf)
     return 6;
 }
 
+/* ── ServerHello Parser and Key Exchange ── */
+
+/*
+ * HelloRetryRequest sentinel random value (RFC 8446 Section 4.1.3).
+ * If the ServerHello random field matches this value exactly, the
+ * message is actually a HelloRetryRequest, not a real ServerHello.
+ */
+static const unsigned char hrr_random[32] = {
+    0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+    0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+    0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+    0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C
+};
+
+/*
+ * Compute X25519 shared secret.
+ *
+ * Performs scalar multiplication: shared_secret = private_key * peer_public_key.
+ * BearSSL's mul() operates in-place on the point buffer, so we copy the
+ * peer's public key first, then multiply.
+ *
+ * Returns 0 on success, -1 on error (e.g. peer sent point at infinity).
+ */
+static int tls13_x25519_shared_secret(const unsigned char *private_key,
+                                      const unsigned char *peer_public_key,
+                                      unsigned char *shared_secret)
+{
+    const br_ec_impl *ec = &br_ec_c25519_m15;
+    uint32_t result;
+
+    /*
+     * Copy the peer's public key into the output buffer.
+     * BearSSL's mul() does the multiplication in-place: the point G
+     * is replaced with x * G. For X25519, the point is just the
+     * 32-byte u-coordinate (no 0x04 prefix).
+     */
+    memcpy(shared_secret, peer_public_key, 32);
+
+    /*
+     * Perform scalar multiplication: shared_secret = private_key * peer_public.
+     * BearSSL's mul() handles clamping of the private key internally
+     * for Curve25519.
+     */
+    result = ec->mul(shared_secret, 32, private_key, 32, BR_EC_curve25519);
+
+    if (result == 0) {
+        secure_wipe(shared_secret, 32);
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * Determine the AEAD key length for a TLS 1.3 cipher suite.
+ * AES-128-GCM uses 16-byte keys; AES-256-GCM and ChaCha20-Poly1305 use 32.
+ */
+static size_t tls13_key_len_for_suite(uint16_t suite)
+{
+    switch (suite) {
+    case TLS13_AES_128_GCM_SHA256:
+        return 16;
+    case TLS13_AES_256_GCM_SHA384:
+    case TLS13_CHACHA20_POLY1305_SHA256:
+        return 32;
+    default:
+        return 0;
+    }
+}
+
+/*
+ * Get the hash class for a TLS 1.3 cipher suite.
+ * AES-256-GCM-SHA384 uses SHA-384; everything else uses SHA-256.
+ */
+static const br_hash_class *tls13_hash_for_suite(uint16_t suite)
+{
+    if (suite == TLS13_AES_256_GCM_SHA384) {
+        return &br_sha384_vtable;
+    }
+    return &br_sha256_vtable;
+}
+
+/*
+ * Parse a ServerHello message and extract key material.
+ *
+ * The message buffer starts at the handshake header (type byte),
+ * NOT the TLS record header. Format:
+ *
+ *   HandshakeType (1) = 2 (ServerHello)
+ *   uint24 length (3)
+ *   ProtocolVersion legacy_version (2) = 0x0303
+ *   Random (32)
+ *   opaque legacy_session_id_echo<0..32>
+ *   CipherSuite (2)
+ *   uint8 legacy_compression_method (1) = 0
+ *   Extension extensions<6..2^16-1>
+ *
+ * Returns:
+ *   kTLS13_OK         — TLS 1.3 ServerHello parsed, shared secret computed
+ *   kTLS13_Fallback12 — server chose TLS 1.2
+ *   kTLS13_WantRead   — this is an HRR; cookie saved, must resend ClientHello
+ *   kTLS13_Error      — parse error
+ */
+static tls13_hs_result tls13_parse_server_hello(tls13_hs_ctx *hs,
+                                                const unsigned char *msg,
+                                                size_t msg_len)
+{
+    size_t pos = 0;
+    uint32_t hs_msg_len;
+    const unsigned char *random;
+    uint8_t session_id_len;
+    uint16_t cipher_suite;
+    uint16_t ext_total_len;
+    size_t ext_end;
+    int is_hrr;
+    int found_supported_versions = 0;
+    int found_key_share = 0;
+    unsigned char server_public[32];
+    uint16_t negotiated_version = 0;
+
+    /*
+     * Minimum ServerHello size:
+     * 4 (hs header) + 2 (version) + 32 (random) + 1 (session_id_len) +
+     * 2 (cipher suite) + 1 (compression) + 2 (extensions length) = 44
+     */
+    if (msg_len < 44) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
+    }
+
+    /* Handshake header: type must be ServerHello (2) */
+    if (msg[0] != TLS13_HT_SERVER_HELLO) {
+        hs->error = BR_ERR_UNEXPECTED;
+        return kTLS13_Error;
+    }
+    hs_msg_len = get_u24(msg + 1);
+    pos = 4;
+
+    /* Sanity check: declared length must match available data */
+    if (hs_msg_len + 4 > msg_len) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
+    }
+
+    /* legacy_version: must be 0x0303 (TLS 1.2) */
+    if (get_u16(msg + pos) != TLS12_VERSION) {
+        hs->error = BR_ERR_BAD_VERSION;
+        return kTLS13_Error;
+    }
+    pos += 2;
+
+    /* Random (32 bytes) — save pointer for HRR check */
+    random = msg + pos;
+    pos += 32;
+
+    /* Check for HelloRetryRequest by comparing random to sentinel */
+    is_hrr = (memcmp(random, hrr_random, 32) == 0);
+
+    /* legacy_session_id_echo: variable length, skip it */
+    session_id_len = msg[pos];
+    pos += 1;
+    if (pos + session_id_len > msg_len) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
+    }
+    pos += session_id_len;
+
+    /* CipherSuite (2 bytes) */
+    if (pos + 2 > msg_len) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
+    }
+    cipher_suite = get_u16(msg + pos);
+    pos += 2;
+
+    /* legacy_compression_method: must be 0 */
+    if (pos >= msg_len || msg[pos] != 0) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
+    }
+    pos += 1;
+
+    /* Extensions — parse to find supported_versions, key_share, cookie */
+    if (pos + 2 > msg_len) {
+        /* No extensions at all — this is a TLS 1.2 ServerHello */
+        return kTLS13_Fallback12;
+    }
+    ext_total_len = get_u16(msg + pos);
+    pos += 2;
+    ext_end = pos + ext_total_len;
+
+    if (ext_end > msg_len) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
+    }
+
+    while (pos + 4 <= ext_end) {
+        uint16_t ext_type = get_u16(msg + pos);
+        uint16_t ext_len = get_u16(msg + pos + 2);
+        const unsigned char *ext_data = msg + pos + 4;
+        pos += 4;
+
+        if (pos + ext_len > ext_end) {
+            hs->error = BR_ERR_BAD_PARAM;
+            return kTLS13_Error;
+        }
+
+        switch (ext_type) {
+        case TLS13_EXT_SUPPORTED_VERSIONS:
+            /*
+             * In ServerHello, supported_versions contains exactly one
+             * ProtocolVersion (2 bytes) — the version selected by the server.
+             * (Unlike ClientHello which sends a list.)
+             */
+            if (ext_len != 2) {
+                hs->error = BR_ERR_BAD_PARAM;
+                return kTLS13_Error;
+            }
+            negotiated_version = get_u16(ext_data);
+            found_supported_versions = 1;
+            break;
+
+        case TLS13_EXT_KEY_SHARE:
+            /*
+             * In ServerHello, key_share contains a single KeyShareEntry:
+             *   NamedGroup group (2)
+             *   uint16 key_exchange_length (2)
+             *   opaque key_exchange (key_exchange_length)
+             *
+             * For X25519, key_exchange is 32 bytes (the u-coordinate).
+             */
+            if (ext_len < 4) {
+                hs->error = BR_ERR_BAD_PARAM;
+                return kTLS13_Error;
+            }
+            {
+                uint16_t group = get_u16(ext_data);
+                uint16_t ke_len = get_u16(ext_data + 2);
+
+                if (group != TLS13_GROUP_X25519) {
+                    /* Server chose a group we don't support */
+                    hs->error = BR_ERR_BAD_PARAM;
+                    return kTLS13_Error;
+                }
+                if (ke_len != 32 || ext_len != 4 + 32) {
+                    hs->error = BR_ERR_BAD_PARAM;
+                    return kTLS13_Error;
+                }
+                memcpy(server_public, ext_data + 4, 32);
+                found_key_share = 1;
+            }
+            break;
+
+        case TLS13_EXT_COOKIE:
+            /*
+             * Cookie extension (only in HelloRetryRequest):
+             *   uint16 cookie_length
+             *   opaque cookie[cookie_length]
+             */
+            if (ext_len < 2) {
+                hs->error = BR_ERR_BAD_PARAM;
+                return kTLS13_Error;
+            }
+            {
+                uint16_t cookie_len = get_u16(ext_data);
+                if (cookie_len + 2 != ext_len) {
+                    hs->error = BR_ERR_BAD_PARAM;
+                    return kTLS13_Error;
+                }
+                if (cookie_len > sizeof(hs->cookie)) {
+                    hs->error = BR_ERR_TOO_LARGE;
+                    return kTLS13_Error;
+                }
+                memcpy(hs->cookie, ext_data + 2, cookie_len);
+                hs->cookie_len = cookie_len;
+            }
+            break;
+
+        default:
+            /* Ignore unknown extensions */
+            break;
+        }
+
+        pos += ext_len;
+    }
+
+    /*
+     * Version negotiation: if supported_versions is absent or contains
+     * 0x0303, this is TLS 1.2. If it contains 0x0304, this is TLS 1.3.
+     */
+    if (!found_supported_versions || negotiated_version == TLS12_VERSION) {
+        return kTLS13_Fallback12;
+    }
+    if (negotiated_version != TLS13_VERSION) {
+        hs->error = BR_ERR_BAD_VERSION;
+        return kTLS13_Error;
+    }
+
+    /* Save negotiated cipher suite */
+    hs->cipher_suite = cipher_suite;
+    hs->is_tls13 = true;
+
+    /*
+     * Validate cipher suite — must be one we offered.
+     */
+    if (tls13_key_len_for_suite(cipher_suite) == 0) {
+        hs->error = BR_ERR_BAD_CIPHER_SUITE;
+        return kTLS13_Error;
+    }
+
+    /*
+     * Handle HelloRetryRequest.
+     */
+    if (is_hrr) {
+        if (hs->hrr_received) {
+            /* RFC 8446: only one HRR allowed */
+            hs->error = BR_ERR_UNEXPECTED;
+            return kTLS13_Error;
+        }
+        hs->hrr_received = true;
+
+        /*
+         * Update transcript for HRR per RFC 8446 Section 4.4.1:
+         *
+         * 1. Current transcript has just ClientHello1
+         * 2. Reset: replace with synthetic message_hash(Hash(CH1))
+         * 3. Feed the HRR (ServerHello) into the reset transcript
+         *
+         * After this, transcript = Hash(message_hash || HRR),
+         * ready for the retry ClientHello to be appended.
+         */
+        tls13_transcript_reset_for_hrr(&hs->transcript);
+        tls13_transcript_update(&hs->transcript, msg, hs_msg_len + 4);
+
+        /* Signal caller to resend ClientHello */
+        return kTLS13_WantRead;  /* reused as "need to retry" signal */
+    }
+
+    /*
+     * Regular ServerHello — we need a key_share extension.
+     */
+    if (!found_key_share) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
+    }
+
+    /*
+     * Re-initialize key schedule if the negotiated hash differs from
+     * our default (SHA-256). This happens if the server chose
+     * TLS_AES_256_GCM_SHA384.
+     */
+    {
+        const br_hash_class *suite_hash = tls13_hash_for_suite(cipher_suite);
+        if (suite_hash != hs->transcript.hash) {
+            /*
+             * The server chose a cipher suite with a different hash.
+             * We need to re-hash the transcript from scratch with the
+             * new hash. For simplicity, since we only support SHA-256
+             * and SHA-384, and our default is SHA-256, this only happens
+             * for AES-256-GCM-SHA384.
+             *
+             * TODO: In a full implementation, we'd need to re-hash from
+             * the original ClientHello bytes. For now, treat this as an
+             * error since our preferred suites all use SHA-256.
+             */
+            hs->error = BR_ERR_BAD_CIPHER_SUITE;
+            return kTLS13_Error;
+        }
+    }
+
+    /*
+     * Update transcript hash with the full ServerHello handshake message.
+     * This must happen before we derive keys, since the transcript hash
+     * at this point (Hash(CH || SH)) is used for key derivation.
+     */
+    tls13_transcript_update(&hs->transcript, msg, hs_msg_len + 4);
+
+    /*
+     * Compute X25519 shared secret.
+     */
+    {
+        unsigned char shared_secret[32];
+        unsigned char transcript_hash[64];
+        unsigned char client_key[32], client_iv[12];
+        unsigned char server_key[32], server_iv[12];
+        size_t key_len;
+        int ret;
+
+        ret = tls13_x25519_shared_secret(hs->ecdhe_secret, server_public,
+                                         shared_secret);
+        if (ret != 0) {
+            hs->error = BR_ERR_BAD_PARAM;
+            return kTLS13_Error;
+        }
+
+        /*
+         * Derive handshake keys.
+         *
+         * Key schedule progression:
+         * 1. Extract Early Secret (from zeros — no PSK)
+         * 2. Extract Handshake Secret (from shared secret)
+         * 3. Derive traffic keys from transcript hash
+         */
+        tls13_ks_init(&hs->ks, hs->transcript.hash);
+        tls13_ks_extract_early(&hs->ks);
+        tls13_ks_extract_handshake(&hs->ks, shared_secret, 32);
+
+        /* Wipe the shared secret immediately after use */
+        secure_wipe(shared_secret, sizeof(shared_secret));
+
+        /* Get transcript hash: Hash(ClientHello || ServerHello) */
+        tls13_transcript_snapshot(&hs->transcript, transcript_hash);
+
+        /* Derive handshake traffic keys + save raw traffic secrets */
+        key_len = tls13_key_len_for_suite(cipher_suite);
+        tls13_ks_derive_handshake_keys(&hs->ks, transcript_hash,
+                                       key_len,
+                                       client_key, client_iv,
+                                       server_key, server_iv,
+                                       hs->client_hs_secret,
+                                       hs->server_hs_secret);
+
+        /* Initialize record contexts for encrypted communication */
+        tls13_record_init(&hs->read_ctx,
+                          server_key, key_len, server_iv, cipher_suite);
+        tls13_record_init(&hs->write_ctx,
+                          client_key, key_len, client_iv, cipher_suite);
+
+        /* Wipe intermediate key material from the stack */
+        secure_wipe(transcript_hash, sizeof(transcript_hash));
+        secure_wipe(client_key, sizeof(client_key));
+        secure_wipe(client_iv, sizeof(client_iv));
+        secure_wipe(server_key, sizeof(server_key));
+        secure_wipe(server_iv, sizeof(server_iv));
+    }
+
+    /* Wipe the private key — no longer needed after key exchange */
+    secure_wipe(hs->ecdhe_secret, sizeof(hs->ecdhe_secret));
+
+    return kTLS13_OK;
+}
+
+/*
+ * Handle the kTLS13_RecvServerHello state.
+ *
+ * Reads TLS records from the engine's recvrec buffer. Ignores CCS
+ * records (middlebox compatibility). When a Handshake record arrives,
+ * parses it as ServerHello.
+ *
+ * Possible outcomes:
+ *   - TLS 1.3 ServerHello: compute shared secret, derive handshake keys,
+ *     advance to kTLS13_RecvEncryptedExtensions
+ *   - HelloRetryRequest: save cookie, reset transcript, go back to
+ *     kTLS13_SendClientHello
+ *   - TLS 1.2 fallback: return kTLS13_Fallback12 to let the caller
+ *     restart with BearSSL's T0 engine
+ */
+static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
+                                                     br_ssl_engine_context *eng)
+{
+    unsigned char *buf;
+    size_t len;
+    uint8_t record_type;
+    uint16_t record_len;
+    tls13_hs_result result;
+
+    /* Try to read a record from BearSSL's receive buffer */
+    buf = br_ssl_engine_recvrec_buf(eng, &len);
+    if (buf == NULL || len == 0) {
+        return kTLS13_WantRead;
+    }
+
+    /*
+     * Parse the TLS record header (5 bytes):
+     *   content_type (1)
+     *   legacy_record_version (2) — 0x0301 or 0x0303
+     *   length (2)
+     */
+    if (len < 5) {
+        return kTLS13_WantRead;
+    }
+
+    record_type = buf[0];
+    record_len = get_u16(buf + 3);
+
+    /* Check we have the full record */
+    if (len < (size_t)(5 + record_len)) {
+        return kTLS13_WantRead;
+    }
+
+    /*
+     * Handle CCS records (type 20).
+     * These are expected for middlebox compatibility and are silently
+     * ignored. The CCS is just one byte: 0x01.
+     */
+    if (record_type == TLS13_CT_CHANGE_CIPHER_SPEC) {
+        br_ssl_engine_recvrec_ack(eng, 5 + record_len);
+        return kTLS13_WantRead;
+    }
+
+    /* We expect a Handshake record (type 22) */
+    if (record_type != TLS13_CT_HANDSHAKE) {
+        hs->error = BR_ERR_UNEXPECTED;
+        return kTLS13_Error;
+    }
+
+    /*
+     * Parse the handshake message.
+     * The record payload (after the 5-byte header) is the handshake
+     * message starting with the type byte.
+     */
+    result = tls13_parse_server_hello(hs, buf + 5, record_len);
+
+    /* Acknowledge the consumed record data */
+    br_ssl_engine_recvrec_ack(eng, 5 + record_len);
+
+    return result;
+}
+
 /* ── Handshake State Machine ── */
 
 /*
@@ -579,11 +1121,7 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
     br_hmac_drbg_init(&rng, &br_sha256_vtable, seed, sizeof(seed));
 
     /* Wipe the seed from the stack */
-    {
-        volatile unsigned char *p = (volatile unsigned char *)seed;
-        size_t si;
-        for (si = 0; si < sizeof(seed); si++) p[si] = 0;
-    }
+    secure_wipe(seed, sizeof(seed));
 
     /*
      * Initialize transcript hash.
@@ -665,9 +1203,23 @@ tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
         return r;
     }
 
-    case kTLS13_RecvServerHello:
-        /* TODO: Task 5 — parse ServerHello, handle HRR */
-        return kTLS13_WantRead;
+    case kTLS13_RecvServerHello: {
+        tls13_hs_result r = tls13_state_recv_server_hello(hs, eng);
+        if (r == kTLS13_OK) {
+            /* TLS 1.3 ServerHello processed — advance to encrypted phase */
+            hs->state = kTLS13_RecvEncryptedExtensions;
+            return kTLS13_OK;
+        }
+        if (r == kTLS13_WantRead && hs->hrr_received) {
+            /*
+             * HelloRetryRequest received — go back to send a new
+             * ClientHello with the cookie and possibly a new key share.
+             */
+            hs->state = kTLS13_SendClientHello;
+            return kTLS13_OK;
+        }
+        return r;
+    }
 
     case kTLS13_RecvEncryptedExtensions:
         /* TODO: Task 6 */

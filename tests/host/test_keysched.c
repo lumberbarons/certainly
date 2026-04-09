@@ -117,9 +117,10 @@ static void test_handshake_secret(void)
     }
 
     /* Derive handshake keys */
-    tls13_ks_derive_handshake_keys(&ks, transcript_hash,
+    tls13_ks_derive_handshake_keys(&ks, transcript_hash, 32,
                                     client_key, client_iv,
-                                    server_key, server_iv);
+                                    server_key, server_iv,
+                                    NULL, NULL);
 
     /* Expected server handshake key from RFC 8448 */
     {

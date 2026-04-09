@@ -40,20 +40,28 @@ void tls13_ks_extract_handshake(tls13_keysched *ks,
                                 const void *shared_secret, size_t len);
 
 /* Derive client and server handshake traffic keys + IVs.
- * transcript_hash is Hash(ClientHello || ServerHello). */
+ * transcript_hash is Hash(ClientHello || ServerHello).
+ * key_len is the AEAD key size (16 for AES-128, 32 for AES-256/ChaCha20).
+ * If client_secret_out / server_secret_out are non-NULL, the raw traffic
+ * secrets are copied there (needed later for Finished key derivation). */
 void tls13_ks_derive_handshake_keys(tls13_keysched *ks,
                                     const void *transcript_hash,
+                                    size_t key_len,
                                     void *client_key, void *client_iv,
-                                    void *server_key, void *server_iv);
+                                    void *server_key, void *server_iv,
+                                    void *client_secret_out,
+                                    void *server_secret_out);
 
 /* Step 3: Derive-Secret(handshake, "derived", "") then
  * Extract Master Secret (using zeros as input key material). */
 void tls13_ks_extract_master(tls13_keysched *ks);
 
 /* Derive client and server application traffic keys + IVs.
- * transcript_hash is Hash(ClientHello || ... || server Finished). */
+ * transcript_hash is Hash(ClientHello || ... || server Finished).
+ * key_len is the AEAD key size (16 for AES-128, 32 for AES-256/ChaCha20). */
 void tls13_ks_derive_app_keys(tls13_keysched *ks,
                               const void *transcript_hash,
+                              size_t key_len,
                               void *client_key, void *client_iv,
                               void *server_key, void *server_iv);
 

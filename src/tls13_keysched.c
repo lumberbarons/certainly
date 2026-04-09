@@ -222,12 +222,14 @@ void tls13_ks_extract_handshake(tls13_keysched *ks,
 
 void tls13_ks_derive_handshake_keys(tls13_keysched *ks,
                                     const void *transcript_hash,
+                                    size_t key_len,
                                     void *client_key, void *client_iv,
-                                    void *server_key, void *server_iv)
+                                    void *server_key, void *server_iv,
+                                    void *client_secret_out,
+                                    void *server_secret_out)
 {
     unsigned char client_secret[64];
     unsigned char server_secret[64];
-    size_t key_len = 32; /* AES-256 or ChaCha20 */
 
     /* Derive client/server handshake traffic secrets */
     derive_secret(ks->hash, ks->hash_len,
@@ -241,6 +243,14 @@ void tls13_ks_derive_handshake_keys(tls13_keysched *ks,
                   "s hs traffic", 12,
                   transcript_hash,
                   server_secret);
+
+    /* Copy raw traffic secrets if requested (needed for Finished keys) */
+    if (client_secret_out != NULL) {
+        memcpy(client_secret_out, client_secret, ks->hash_len);
+    }
+    if (server_secret_out != NULL) {
+        memcpy(server_secret_out, server_secret, ks->hash_len);
+    }
 
     /* Expand traffic secrets into keys and IVs */
     hkdf_expand_label(ks->hash, client_secret, ks->hash_len,
@@ -287,12 +297,12 @@ void tls13_ks_extract_master(tls13_keysched *ks)
 
 void tls13_ks_derive_app_keys(tls13_keysched *ks,
                               const void *transcript_hash,
+                              size_t key_len,
                               void *client_key, void *client_iv,
                               void *server_key, void *server_iv)
 {
     unsigned char client_secret[64];
     unsigned char server_secret[64];
-    size_t key_len = 32;
 
     derive_secret(ks->hash, ks->hash_len,
                   ks->secret,
