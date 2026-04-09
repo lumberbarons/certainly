@@ -79,7 +79,7 @@ int main(void)
     MacTLS_Init();
 
     /* Create window */
-    window = NewWindow(NULL, &windowRect, "\pCertainly — HTTPS GET",
+    window = NewWindow(NULL, &windowRect, "\pCertainly - HTTPS GET",
                        true, documentProc, (WindowPtr)-1, false, 0);
     SetPort(window);
 
@@ -90,7 +90,23 @@ int main(void)
     ctx = MacTLS_Create(host, 443);
     if (ctx == NULL) {
         DrawStatusLine(window, displayLine++,
-                       "ERROR: Failed to create context");
+                       "ERROR: Failed to create context (NULL)");
+        goto wait_quit;
+    }
+
+    {
+        char dbg[128];
+        sprintf(dbg, "Created ctx, state=%d err=%d OT=%ld",
+                MacTLS_GetState(ctx), MacTLS_GetError(ctx),
+                (long)MacTLS_GetOTError(ctx));
+        DrawStatusLine(window, displayLine++, dbg);
+    }
+
+    if (MacTLS_GetState(ctx) == kMacTLS_Error) {
+        char errMsg[128];
+        sprintf(errMsg, "Create failed: code=%d, OT=%ld",
+                MacTLS_GetError(ctx), (long)MacTLS_GetOTError(ctx));
+        DrawStatusLine(window, displayLine++, errMsg);
         goto wait_quit;
     }
 
@@ -111,7 +127,7 @@ int main(void)
 
         switch (state) {
         case kMacTLS_Connecting:
-            /* TCP still connecting — just wait */
+            DrawStatusLine(window, 2, "TCP connecting (DNS/connect)...");
             break;
 
         case kMacTLS_Handshaking:
@@ -167,9 +183,10 @@ int main(void)
         case kMacTLS_Error:
             {
                 char errMsg[128];
-                sprintf(errMsg, "ERROR: code=%d, OT=%ld",
+                sprintf(errMsg, "ERROR: code=%d, OT=%ld, BearSSL=%d",
                         MacTLS_GetError(ctx),
-                        (long)MacTLS_GetOTError(ctx));
+                        (long)MacTLS_GetOTError(ctx),
+                        MacTLS_GetBearSSLError(ctx));
                 DrawStatusLine(window, displayLine++, errMsg);
             }
             done = true;

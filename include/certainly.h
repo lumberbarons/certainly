@@ -83,6 +83,7 @@ size_t MacTLS_Available(const MacTLS_Context *ctx);
 MacTLS_State MacTLS_GetState(const MacTLS_Context *ctx);
 MacTLS_Error MacTLS_GetError(const MacTLS_Context *ctx);
 OSStatus     MacTLS_GetOTError(const MacTLS_Context *ctx);
+int          MacTLS_GetBearSSLError(const MacTLS_Context *ctx);
 
 /* ── Configuration ── */
 MacTLS_Config *MacTLS_ConfigCreate(void);

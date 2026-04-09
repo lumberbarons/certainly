@@ -385,6 +385,11 @@ OSStatus MacTLS_GetOTError(const MacTLS_Context *ctx)
     return noErr;
 }
 
+int MacTLS_GetBearSSLError(const MacTLS_Context *ctx)
+{
+    return br_ssl_engine_last_error(&((MacTLS_Context *)ctx)->sc.eng);
+}
+
 /* ── Configuration ── */
 
 MacTLS_Config *MacTLS_ConfigCreate(void)
