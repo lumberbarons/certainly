@@ -12,6 +12,7 @@
 #include "ot_transport.h"
 #include "entropy.h"
 #include "ca_roots.h"
+#include "tls13_handshake.h"
 
 #include <bearssl.h>
 
@@ -59,6 +60,9 @@ struct MacTLS_Context {
 
     /* Config reference (NULL = use defaults) */
     const MacTLS_Config *config;
+
+    /* TLS 1.3 handshake context (only used during TLS 1.3 handshake) */
+    tls13_hs_ctx    hs13;
 };
 
 struct MacTLS_Config {
