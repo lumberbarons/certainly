@@ -37,6 +37,10 @@ typedef struct {
     /* OT endpoint — the "phone" we talk through */
     EndpointRef     endpoint;
 
+    /* Internet services provider handle used for DNS resolution.
+     * Opened in ot_start_dns() and closed in ot_transport_destroy(). */
+    InetSvcRef      inetSvc;
+
     /* DNS resolution result */
     InetHostInfo    hostInfo;
     uint16_t        port;

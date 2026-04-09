@@ -305,6 +305,14 @@ void MacTLS_Close(MacTLS_Context *ctx)
     }
 
     ctx->state = kMacTLS_Closed;
+
+    /* Zero sensitive data before freeing — Mac OS 9 has no memory protection */
+    {
+        volatile unsigned char *p = (volatile unsigned char *)ctx;
+        size_t i;
+        for (i = 0; i < sizeof(MacTLS_Context); i++) p[i] = 0;
+    }
+
     DisposePtr((Ptr)ctx);
 }
 

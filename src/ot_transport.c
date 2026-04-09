@@ -145,10 +145,9 @@ static OSStatus ot_setup_endpoint(OTTransport *t)
  */
 static void ot_start_dns(OTTransport *t, const char *host)
 {
-    InetSvcRef inetSvc;
     OSStatus   err;
 
-    inetSvc = OTOpenInternetServices(
+    t->inetSvc = OTOpenInternetServices(
         kDefaultInternetServicesPath,
         0, &err
     );
@@ -158,10 +157,10 @@ static void ot_start_dns(OTTransport *t, const char *host)
         return;
     }
 
-    OTInstallNotifier(inetSvc, ot_notifier, t);
-    OTSetAsynchronous(inetSvc);
+    OTInstallNotifier(t->inetSvc, ot_notifier, t);
+    OTSetAsynchronous(t->inetSvc);
 
-    err = OTInetStringToAddress(inetSvc, (char *)host, &t->hostInfo);
+    err = OTInetStringToAddress(t->inetSvc, (char *)host, &t->hostInfo);
     if (err != noErr && err != kOTNoError) {
         t->lastError = err;
         t->state = kOTTransport_Error;
@@ -344,6 +343,10 @@ void ot_transport_close(OTTransport *t)
 void ot_transport_destroy(OTTransport *t)
 {
     if (t == NULL) return;
+
+    if (t->inetSvc != NULL) {
+        OTCloseProvider(t->inetSvc);
+    }
 
     if (t->endpoint != NULL) {
         OTCloseProvider(t->endpoint);

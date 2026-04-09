@@ -112,6 +112,62 @@ static void gather_sources(void)
     pool_mix(stackJunk, sizeof(stackJunk));
 }
 
+/*
+ * Harvest entropy from timer jitter.
+ * Calls Microseconds() in a tight loop and extracts LSBs of deltas.
+ * Von Neumann debiasing ensures unbiased output.
+ * Targets at least 256 bits (~32 bytes) of entropy.
+ */
+static void harvest_timer_jitter(void)
+{
+    UnsignedWide prev, curr;
+    uint8_t      jitter_pool[64];
+    int          byte_idx = 0;
+    int          bit_idx = 0;
+    int          pairs = 0;
+
+    memset(jitter_pool, 0, sizeof(jitter_pool));
+    Microseconds(&prev);
+
+    while (byte_idx < (int)sizeof(jitter_pool)) {
+        unsigned long delta1, delta2;
+        int bit1, bit2;
+
+        /* Get two consecutive timer deltas */
+        Microseconds(&curr);
+        delta1 = curr.lo - prev.lo;
+        prev = curr;
+
+        Microseconds(&curr);
+        delta2 = curr.lo - prev.lo;
+        prev = curr;
+
+        /* Von Neumann debiasing: compare LSBs of the two deltas */
+        bit1 = (int)(delta1 & 1);
+        bit2 = (int)(delta2 & 1);
+
+        if (bit1 != bit2) {
+            /* Unequal pair — take the first bit */
+            jitter_pool[byte_idx] |= (uint8_t)(bit1 << bit_idx);
+            bit_idx++;
+            if (bit_idx >= 8) {
+                bit_idx = 0;
+                byte_idx++;
+            }
+        }
+        /* Equal pairs are discarded (Von Neumann debiasing) */
+
+        pairs++;
+        /* Safety valve — don't loop forever if timer has no jitter */
+        if (pairs > 100000) break;
+    }
+
+    pool_mix(jitter_pool, sizeof(jitter_pool));
+
+    /* Overwrite local buffer with zeros — don't leave entropy on stack */
+    memset(jitter_pool, 0, sizeof(jitter_pool));
+}
+
 void entropy_init(void)
 {
     MachineLocation loc;
@@ -134,12 +190,32 @@ void entropy_init(void)
 
     /* Gather again — the time elapsed during ReadLocation adds jitter */
     gather_sources();
+
+    /*
+     * Harvest timer jitter for additional high-quality entropy.
+     * This runs AFTER the initial gather_sources() calls so that
+     * any timing variation from those calls also contributes.
+     */
+    harvest_timer_jitter();
+
+    /*
+     * NOTE: MAC address would be a useful additional one-time salt here
+     * (hardware address is unique per machine and unknown to a remote
+     * attacker). However, reading the MAC requires Open Transport
+     * (OTInetGetInterfaceInfo or similar), which may not be initialized
+     * at the time entropy_init() is called. If OT is available at this
+     * point in your startup sequence, read the MAC via
+     * OTInetGetInterfaceInfo() and mix it in with pool_mix().
+     */
 }
 
 void entropy_seed_engine(br_ssl_engine_context *eng)
 {
     /* Gather fresh entropy right before seeding */
     gather_sources();
+
+    /* Harvest timer jitter for additional entropy before injecting */
+    harvest_timer_jitter();
 
     /*
      * Inject the entire pool into BearSSL's PRNG.
@@ -150,6 +226,9 @@ void entropy_seed_engine(br_ssl_engine_context *eng)
      * never worse.
      */
     br_ssl_engine_inject_entropy(eng, g_pool, POOL_SIZE);
+
+    /* Zero pool copy after injection — defense in depth */
+    memset(g_pool, 0, POOL_SIZE);
 }
 
 void entropy_add(const void *data, size_t len)
