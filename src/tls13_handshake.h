@@ -122,8 +122,13 @@ typedef struct {
     bool                hrr_received;
     bool                cert_request_received;
 
+    /* X.509 validation context (pointer to MacTLS_Context's xc) */
+    const br_x509_class **x509_ctx;
+
     /* Server's public key (from certificate, for CertificateVerify) */
     br_x509_pkey        server_pkey;
+    /* Backing storage for server_pkey's pointer fields */
+    unsigned char       server_pkey_data[520]; /* BR_X509_BUFSIZE_KEY */
 
     /* Error code from BearSSL (if handshake fails) */
     int                 error;
