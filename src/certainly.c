@@ -4,6 +4,13 @@
  * This file is the glue between the public API, BearSSL, and Open Transport.
  * Its main job is the pump loop — shuttling bytes between OT and BearSSL's
  * state machine buffers.
+ *
+ * TLS version negotiation:
+ *   The library always starts by sending a TLS 1.3 ClientHello (which also
+ *   offers TLS 1.2 cipher suites for fallback). If the server responds with
+ *   TLS 1.3, the handshake is driven entirely by our tls13_handshake code.
+ *   If the server responds with TLS 1.2, we reconnect and let BearSSL's
+ *   T0 engine handle the entire handshake.
  */
 
 #include "certainly_internal.h"
@@ -104,13 +111,25 @@ static void setup_bearssl(MacTLS_Context *ctx)
     entropy_seed_engine(&ctx->sc.eng);
 
     /*
-     * Start the TLS handshake. This tells BearSSL "begin as a client
-     * connecting to this hostname." The hostname is used for:
-     *   - SNI (Server Name Indication): sent in the ClientHello so
-     *     the server knows which certificate to present. Essential
-     *     when one IP hosts multiple HTTPS domains.
-     *   - Certificate validation: the X.509 validator checks that
-     *     the server's cert matches this hostname.
+     * Initialize the TLS 1.3 handshake context.
+     *
+     * This prepares the parallel TLS 1.3 state machine. The TLS 1.3
+     * handshake will be attempted first; if the server doesn't support
+     * 1.3, we fall back to BearSSL's T0 engine for TLS 1.2.
+     *
+     * The X.509 validator is shared between both paths — BearSSL's
+     * br_ssl_client_init_full already set up ctx->xc, and we point
+     * the TLS 1.3 context at it.
+     */
+    tls13_handshake_init(&ctx->hs13);
+    ctx->hs13.x509_ctx = (const br_x509_class **)&ctx->xc.vtable;
+
+    /*
+     * Start BearSSL's TLS 1.2 engine. This is needed both for:
+     *   1. TLS 1.2 fallback (if server doesn't support 1.3)
+     *   2. Providing the engine's PRNG for our TLS 1.3 code
+     *
+     * The T0 engine will be dormant unless we fall back to 1.2.
      */
     br_ssl_client_reset(&ctx->sc, ctx->host, 0);
 }
@@ -161,14 +180,355 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
     return ctx;
 }
 
+/* ── TLS 1.3 Pump Helpers ── */
+
+/*
+ * Drive the TLS 1.3 handshake forward.
+ *
+ * This function handles the TLS 1.3 handshake by:
+ *   1. Sending outgoing data from hs13.msg_buf via OT transport
+ *   2. Receiving incoming data into BearSSL's recvrec buffer
+ *   3. Calling tls13_handshake_step() to advance the state machine
+ *
+ * Returns the resulting MacTLS_State.
+ *
+ * For the TLS 1.3 handshake, we use a hybrid approach:
+ *   - Outgoing data: sent directly via OT transport from hs13.msg_buf
+ *   - Incoming data: read into BearSSL's recvrec buffer (the handshake
+ *     code uses br_ssl_engine_recvrec_buf/ack to parse records)
+ *
+ * This works because the TLS 1.3 handshake code was designed to read
+ * from recvrec (for record framing) but writes its own records.
+ */
+static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
+{
+    tls13_hs_result r;
+    int n;
+
+    /*
+     * Step 1: If there's outgoing data in msg_buf, send it.
+     * The handshake code fills msg_buf and returns WantWrite.
+     */
+    if (ctx->hs13.msg_offset < ctx->hs13.msg_len) {
+        size_t remaining = ctx->hs13.msg_len - ctx->hs13.msg_offset;
+        n = ot_transport_send(ctx->transport,
+                              ctx->hs13.msg_buf + ctx->hs13.msg_offset,
+                              remaining);
+        if (n > 0) {
+            ctx->hs13.msg_offset += n;
+        } else if (n < 0) {
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrWrite;
+            return ctx->state;
+        }
+        /* If we haven't finished sending, come back later */
+        if (ctx->hs13.msg_offset < ctx->hs13.msg_len) {
+            return ctx->state;
+        }
+    }
+
+    /*
+     * Step 2: Read incoming data into BearSSL's recvrec buffer.
+     * The TLS 1.3 handshake code reads records from here.
+     */
+    {
+        unsigned char *buf;
+        size_t len;
+
+        buf = br_ssl_engine_recvrec_buf(&ctx->sc.eng, &len);
+        if (buf != NULL && len > 0) {
+            n = ot_transport_recv(ctx->transport, buf, len);
+            if (n > 0) {
+                br_ssl_engine_recvrec_ack(&ctx->sc.eng, n);
+            } else if (n < 0) {
+                if (ctx->transport->ordRelReceived ||
+                    ctx->transport->disconnectReceived) {
+                    ctx->state = kMacTLS_Closed;
+                    return ctx->state;
+                }
+                ctx->state = kMacTLS_Error;
+                ctx->error = kMacTLS_ErrRead;
+                return ctx->state;
+            }
+        }
+    }
+
+    /*
+     * Step 3: Advance the TLS 1.3 handshake state machine.
+     */
+    r = tls13_handshake_step(&ctx->hs13, &ctx->sc.eng, ctx->host);
+
+    switch (r) {
+    case kTLS13_OK:
+        /* State advanced — pump again on next call */
+        ctx->state = kMacTLS_Handshaking;
+        break;
+
+    case kTLS13_WantRead:
+        /* Need more data from network */
+        ctx->state = kMacTLS_Handshaking;
+        break;
+
+    case kTLS13_WantWrite:
+        /* Have data to send — will be flushed on next pump */
+        ctx->state = kMacTLS_Handshaking;
+        break;
+
+    case kTLS13_Fallback12:
+        /*
+         * Server chose TLS 1.2 — fall back.
+         *
+         * The simplest fallback approach: close the current TCP connection
+         * and reconnect, letting BearSSL's T0 engine handle the entire
+         * TLS 1.2 handshake from scratch.
+         *
+         * This is simpler than trying to replay the ServerHello through
+         * BearSSL's engine (which would require feeding raw bytes into
+         * a very specific T0 state). The cost of a second TCP handshake
+         * is negligible compared to the TLS handshake itself.
+         *
+         * Flow:
+         * 1. Close current OT transport
+         * 2. Create a new OT transport to the same host:port
+         * 3. Re-init BearSSL (it will do its own ClientHello)
+         * 4. Set tls13_active = false so the pump loop uses BearSSL
+         */
+        {
+            uint16_t port = ctx->transport->port;
+
+            /* Close and destroy the current transport */
+            ot_transport_close(ctx->transport);
+            ot_transport_destroy(ctx->transport);
+
+            /* Create a new transport */
+            ctx->transport = ot_transport_create(ctx->host, port);
+            if (ctx->transport == NULL) {
+                ctx->state = kMacTLS_Error;
+                ctx->error = kMacTLS_ErrMemory;
+                return ctx->state;
+            }
+
+            /* Re-init BearSSL for TLS 1.2 (the T0 engine will drive) */
+            br_ssl_client_reset(&ctx->sc, ctx->host, 0);
+
+            /* Mark as NOT TLS 1.3 — future pumps use BearSSL path */
+            ctx->tls13_active = false;
+            ctx->tls13_started = false;
+            ctx->hs13.is_tls13 = false;
+            ctx->state = kMacTLS_Connecting;
+        }
+        break;
+
+    case kTLS13_Error:
+        ctx->state = kMacTLS_Error;
+        ctx->error = kMacTLS_ErrHandshake;
+        break;
+
+    default:
+        break;
+    }
+
+    /*
+     * Check if the handshake just completed.
+     */
+    if (ctx->hs13.state == kTLS13_Complete &&
+        ctx->hs13.msg_offset >= ctx->hs13.msg_len) {
+        /*
+         * Handshake complete and all outgoing data flushed.
+         * Switch to connected state. From here, MacTLS_Read/Write
+         * will use the TLS 1.3 record layer directly.
+         */
+        ctx->state = kMacTLS_Connected;
+        ctx->tls13_active = true;
+    }
+
+    return ctx->state;
+}
+
+/*
+ * Process incoming TLS 1.3 records during the application data phase.
+ *
+ * Reads raw bytes from OT transport into tls13_recv_buf, then parses
+ * and decrypts complete TLS records. Application data is placed into
+ * tls13_app_buf for MacTLS_Read() to consume. Post-handshake messages
+ * (NewSessionTicket) are handled transparently.
+ *
+ * This function is non-blocking: it processes whatever data is available
+ * and returns.
+ */
+static void tls13_recv_records(MacTLS_Context *ctx)
+{
+    int n;
+
+    /*
+     * Step 1: Read raw bytes from OT transport into recv_buf.
+     */
+    if (ctx->tls13_recv_len < sizeof(ctx->tls13_recv_buf)) {
+        size_t space = sizeof(ctx->tls13_recv_buf) - ctx->tls13_recv_len;
+        n = ot_transport_recv(ctx->transport,
+                              ctx->tls13_recv_buf + ctx->tls13_recv_len,
+                              space);
+        if (n > 0) {
+            ctx->tls13_recv_len += n;
+        } else if (n < 0) {
+            if (ctx->transport->ordRelReceived ||
+                ctx->transport->disconnectReceived) {
+                ctx->state = kMacTLS_Closed;
+                return;
+            }
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrRead;
+            return;
+        }
+    }
+
+    /*
+     * Step 2: Parse complete TLS records from recv_buf.
+     * Keep processing as long as we have complete records.
+     */
+    while (ctx->tls13_recv_len >= 5) {
+        uint16_t record_len;
+        uint8_t record_type;
+        size_t total_record;
+        unsigned char decrypted[16384];
+        size_t dec_len;
+        uint8_t inner_ct;
+        int ret;
+
+        record_type = ctx->tls13_recv_buf[0];
+        record_len = (uint16_t)((ctx->tls13_recv_buf[3] << 8) |
+                                 ctx->tls13_recv_buf[4]);
+
+        total_record = 5 + record_len;
+        if (ctx->tls13_recv_len < total_record) {
+            /* Incomplete record — wait for more data */
+            break;
+        }
+
+        /*
+         * Skip CCS records (type 20) — middlebox compatibility artifacts
+         * that can arrive at any time.
+         */
+        if (record_type == TLS13_CT_CHANGE_CIPHER_SPEC) {
+            /* Consume the record and continue */
+            memmove(ctx->tls13_recv_buf,
+                    ctx->tls13_recv_buf + total_record,
+                    ctx->tls13_recv_len - total_record);
+            ctx->tls13_recv_len -= total_record;
+            continue;
+        }
+
+        /*
+         * Alert records (type 21) — server is signaling something.
+         * For simplicity, treat any alert as connection close.
+         */
+        if (record_type == TLS13_CT_ALERT) {
+            ctx->state = kMacTLS_Closed;
+            return;
+        }
+
+        /*
+         * In TLS 1.3, all encrypted records have outer type 0x17
+         * (application_data). The real content type is inside.
+         */
+        if (record_type != TLS13_CT_APPLICATION_DATA) {
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrRead;
+            return;
+        }
+
+        /* Decrypt the record */
+        ret = tls13_record_decrypt(&ctx->hs13.read_ctx,
+                                   ctx->tls13_recv_buf + 5, record_len,
+                                   decrypted, &dec_len, &inner_ct);
+        if (ret != 0) {
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrRead;
+            return;
+        }
+
+        /* Consume the record from recv_buf */
+        memmove(ctx->tls13_recv_buf,
+                ctx->tls13_recv_buf + total_record,
+                ctx->tls13_recv_len - total_record);
+        ctx->tls13_recv_len -= total_record;
+
+        /*
+         * Dispatch based on the inner (real) content type.
+         */
+        if (inner_ct == TLS13_CT_APPLICATION_DATA) {
+            /*
+             * Application data — append to app_buf for MacTLS_Read().
+             *
+             * If app_buf still has unconsumed data, compact it first
+             * (move remaining data to the front).
+             */
+            size_t app_remaining = ctx->tls13_app_len - ctx->tls13_app_offset;
+            if (ctx->tls13_app_offset > 0 && app_remaining > 0) {
+                memmove(ctx->tls13_app_buf,
+                        ctx->tls13_app_buf + ctx->tls13_app_offset,
+                        app_remaining);
+                ctx->tls13_app_len = app_remaining;
+                ctx->tls13_app_offset = 0;
+            } else if (app_remaining == 0) {
+                ctx->tls13_app_len = 0;
+                ctx->tls13_app_offset = 0;
+            }
+
+            /* Append decrypted data (truncate if buffer full) */
+            {
+                size_t space = sizeof(ctx->tls13_app_buf) - ctx->tls13_app_len;
+                size_t copy = (dec_len < space) ? dec_len : space;
+                memcpy(ctx->tls13_app_buf + ctx->tls13_app_len,
+                       decrypted, copy);
+                ctx->tls13_app_len += copy;
+            }
+
+        } else if (inner_ct == TLS13_CT_HANDSHAKE) {
+            /*
+             * Post-handshake message (NewSessionTicket, KeyUpdate, etc.)
+             * Dispatch to the post-handshake handler.
+             */
+            tls13_hs_result phr = tls13_handle_post_handshake(
+                &ctx->hs13, decrypted, dec_len);
+            if (phr == kTLS13_Error) {
+                ctx->state = kMacTLS_Error;
+                ctx->error = kMacTLS_ErrHandshake;
+                return;
+            }
+            /* kTLS13_OK means the message was handled (e.g., discarded) */
+
+        } else if (inner_ct == TLS13_CT_ALERT) {
+            /*
+             * Decrypted alert — treat as connection close.
+             */
+            ctx->state = kMacTLS_Closed;
+            return;
+
+        } else {
+            /* Unexpected inner content type */
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrRead;
+            return;
+        }
+    }
+}
+
 /*
  * The pump loop — the heart of Certainly.
  *
  * This function moves bytes between three layers:
- *   App ↔ BearSSL ↔ OT
+ *   App <-> BearSSL/TLS1.3 <-> OT
  *
  * Each call does a bounded amount of work and returns. It NEVER
  * blocks. Call it from your event loop alongside WaitNextEvent.
+ *
+ * Version negotiation flow:
+ *   1. First pump after TCP connect: send TLS 1.3 ClientHello + CCS
+ *   2. Receive ServerHello:
+ *      a. TLS 1.3: continue with our handshake code
+ *      b. TLS 1.2: reconnect and use BearSSL's T0 engine
+ *   3. After handshake completes: use TLS 1.3 or 1.2 data path
  */
 MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
 {
@@ -225,25 +585,49 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
     }
 
     /*
-     * Step 2: Feed BearSSL's state machine.
+     * TLS 1.3 handshake path.
      *
-     * We check what BearSSL needs and give it what we can.
-     * The state bitmask tells us which operations are possible:
-     *
-     *   BR_SSL_SENDREC — BearSSL has encrypted data to send.
-     *     → Pull bytes from BearSSL, push to OT.
-     *
-     *   BR_SSL_RECVREC — BearSSL wants encrypted data from the network.
-     *     → Pull bytes from OT, push to BearSSL.
-     *
-     *   BR_SSL_SENDAPP — BearSSL can accept plaintext to encrypt.
-     *     → (handled by MacTLS_Write, not here)
-     *
-     *   BR_SSL_RECVAPP — BearSSL has decrypted plaintext ready.
-     *     → (handled by MacTLS_Read, not here)
-     *
-     *   BR_SSL_CLOSED — Session is over.
+     * If we haven't fallen back to TLS 1.2, drive the TLS 1.3
+     * handshake state machine. This bypasses BearSSL's T0 engine
+     * entirely during the handshake phase.
      */
+    if (!ctx->tls13_started && ctx->hs13.is_tls13 == false &&
+        ctx->hs13.state == kTLS13_SendClientHello) {
+        /*
+         * First time through after TCP connect — start the TLS 1.3
+         * handshake. The tls13_started flag prevents re-entry after
+         * a TLS 1.2 fallback (where we've cleared the flag and want
+         * BearSSL to drive).
+         */
+        ctx->tls13_started = true;
+        ctx->state = kMacTLS_Handshaking;
+        return tls13_pump_handshake(ctx);
+    }
+
+    if (ctx->tls13_started && ctx->state != kMacTLS_Connected) {
+        /*
+         * TLS 1.3 handshake in progress.
+         * Keep pumping the TLS 1.3 state machine until it completes,
+         * errors, or falls back to TLS 1.2.
+         */
+        return tls13_pump_handshake(ctx);
+    }
+
+    /*
+     * TLS 1.3 connected state — process incoming records.
+     */
+    if (ctx->tls13_active && ctx->state == kMacTLS_Connected) {
+        tls13_recv_records(ctx);
+        return ctx->state;
+    }
+
+    /*
+     * TLS 1.2 path (BearSSL's T0 engine).
+     *
+     * If we fell back to TLS 1.2 (tls13_started == false), or if we're
+     * in the closing state, use BearSSL's engine to drive everything.
+     */
+
     st = br_ssl_engine_current_state(&ctx->sc.eng);
 
     if (st == BR_SSL_CLOSED) {
@@ -261,7 +645,7 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
         return ctx->state;
     }
 
-    /* Send: BearSSL → OT */
+    /* Send: BearSSL -> OT */
     if (st & BR_SSL_SENDREC) {
         buf = br_ssl_engine_sendrec_buf(&ctx->sc.eng, &len);
         if (len > 0) {
@@ -288,7 +672,7 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
         }
     }
 
-    /* Receive: OT → BearSSL */
+    /* Receive: OT -> BearSSL */
     if (st & BR_SSL_RECVREC) {
         buf = br_ssl_engine_recvrec_buf(&ctx->sc.eng, &len);
         if (len > 0) {
@@ -330,25 +714,54 @@ void MacTLS_Close(MacTLS_Context *ctx)
 
     if (ctx->state == kMacTLS_Connected ||
         ctx->state == kMacTLS_Handshaking) {
-        /*
-         * Send TLS close_notify alert. This tells the server
-         * "I'm done, close the encrypted session." It's the TLS
-         * equivalent of hanging up politely rather than just
-         * dropping the connection.
-         */
-        br_ssl_engine_close(&ctx->sc.eng);
-        ctx->state = kMacTLS_Closing;
 
-        /* Pump up to 10 times to flush the close_notify */
-        {
-            int flush_attempts;
-            for (flush_attempts = 0; flush_attempts < 10; flush_attempts++) {
-                MacTLS_State pump_state = MacTLS_Pump(ctx);
-                if (br_ssl_engine_current_state(&ctx->sc.eng) == BR_SSL_CLOSED)
-                    break;
-                /* Stop if pump hit an error — no point retrying */
-                if (pump_state == kMacTLS_Error)
-                    break;
+        if (ctx->tls13_active) {
+            /*
+             * TLS 1.3 close: send a close_notify alert.
+             *
+             * In TLS 1.3, close_notify is an encrypted alert (type 21,
+             * value 0 = close_notify). We encrypt it with our write_ctx
+             * and send it directly.
+             */
+            unsigned char alert[2];
+            unsigned char ciphertext[2 + 1 + TLS13_TAG_SIZE];
+            size_t ct_len;
+            unsigned char record[5 + sizeof(ciphertext)];
+
+            alert[0] = 1;  /* warning level */
+            alert[1] = 0;  /* close_notify */
+
+            if (tls13_record_encrypt(&ctx->hs13.write_ctx,
+                                     alert, 2,
+                                     TLS13_CT_ALERT,
+                                     ciphertext, &ct_len) == 0) {
+                record[0] = TLS13_CT_APPLICATION_DATA;
+                record[1] = 0x03;
+                record[2] = 0x03;
+                record[3] = (unsigned char)(ct_len >> 8);
+                record[4] = (unsigned char)(ct_len);
+                memcpy(record + 5, ciphertext, ct_len);
+
+                /* Best-effort send — don't retry on failure */
+                ot_transport_send(ctx->transport, record, 5 + ct_len);
+            }
+        } else {
+            /*
+             * TLS 1.2 close: use BearSSL's close mechanism.
+             */
+            br_ssl_engine_close(&ctx->sc.eng);
+            ctx->state = kMacTLS_Closing;
+
+            /* Pump up to 10 times to flush the close_notify */
+            {
+                int flush_attempts;
+                for (flush_attempts = 0; flush_attempts < 10; flush_attempts++) {
+                    MacTLS_State pump_state = MacTLS_Pump(ctx);
+                    if (br_ssl_engine_current_state(&ctx->sc.eng) == BR_SSL_CLOSED)
+                        break;
+                    if (pump_state == kMacTLS_Error)
+                        break;
+                }
             }
         }
     }
@@ -376,71 +789,158 @@ void MacTLS_Close(MacTLS_Context *ctx)
 
 int MacTLS_Write(MacTLS_Context *ctx, const void *data, size_t len)
 {
-    unsigned char *buf;
-    size_t         avail;
-
     if (ctx->state != kMacTLS_Connected) return -1;
 
+    if (ctx->tls13_active) {
+        /*
+         * TLS 1.3 write path.
+         *
+         * Encrypt the plaintext into a TLS 1.3 record and send it
+         * directly via OT transport. We bypass BearSSL's sendapp
+         * buffer entirely.
+         *
+         * Max plaintext per record is 16384 (2^14). We cap at that.
+         */
+        unsigned char ciphertext[16384 + 1 + TLS13_TAG_SIZE];
+        unsigned char record_hdr[5];
+        size_t ct_len;
+        int ret, sent, total;
+
+        if (len > 16384) len = 16384;
+
+        ret = tls13_record_encrypt(&ctx->hs13.write_ctx,
+                                   data, len,
+                                   TLS13_CT_APPLICATION_DATA,
+                                   ciphertext, &ct_len);
+        if (ret != 0) return -1;
+
+        /* Build the record header */
+        record_hdr[0] = TLS13_CT_APPLICATION_DATA;  /* 0x17 */
+        record_hdr[1] = 0x03;
+        record_hdr[2] = 0x03;
+        record_hdr[3] = (unsigned char)(ct_len >> 8);
+        record_hdr[4] = (unsigned char)(ct_len);
+
+        /* Send header */
+        sent = ot_transport_send(ctx->transport, record_hdr, 5);
+        if (sent < 0) return -1;
+        if (sent < 5) {
+            /*
+             * Partial header send — this shouldn't happen in practice
+             * since 5 bytes is tiny, but handle gracefully.
+             * For simplicity, report 0 bytes written (caller retries).
+             */
+            return 0;
+        }
+
+        /* Send ciphertext */
+        total = 0;
+        while ((size_t)total < ct_len) {
+            sent = ot_transport_send(ctx->transport,
+                                     ciphertext + total,
+                                     ct_len - total);
+            if (sent < 0) return -1;
+            if (sent == 0) break;
+            total += sent;
+        }
+
+        return (int)len;
+    }
+
     /*
+     * TLS 1.2 write path (BearSSL).
+     *
      * Get BearSSL's sendapp buffer — this is where plaintext goes
      * before BearSSL encrypts it into a TLS record.
      */
-    buf = br_ssl_engine_sendapp_buf(&ctx->sc.eng, &avail);
-    if (buf == NULL || avail == 0) return 0;
+    {
+        unsigned char *bbuf;
+        size_t avail;
 
-    if (len > avail) len = avail;
-    memcpy(buf, data, len);
+        bbuf = br_ssl_engine_sendapp_buf(&ctx->sc.eng, &avail);
+        if (bbuf == NULL || avail == 0) return 0;
 
-    /*
-     * Tell BearSSL we wrote len bytes. BearSSL will encrypt them
-     * on the next engine cycle and make them available via sendrec.
-     */
-    br_ssl_engine_sendapp_ack(&ctx->sc.eng, len);
+        if (len > avail) len = avail;
+        memcpy(bbuf, data, len);
 
-    /*
-     * Flush — tell BearSSL to wrap what we've written into a TLS
-     * record now, rather than waiting for more data. For HTTP
-     * requests, you want each write to go out promptly.
-     */
-    br_ssl_engine_flush(&ctx->sc.eng, 0);
+        /*
+         * Tell BearSSL we wrote len bytes. BearSSL will encrypt them
+         * on the next engine cycle and make them available via sendrec.
+         */
+        br_ssl_engine_sendapp_ack(&ctx->sc.eng, len);
 
-    return (int)len;
+        /*
+         * Flush — tell BearSSL to wrap what we've written into a TLS
+         * record now, rather than waiting for more data. For HTTP
+         * requests, you want each write to go out promptly.
+         */
+        br_ssl_engine_flush(&ctx->sc.eng, 0);
+
+        return (int)len;
+    }
 }
 
 int MacTLS_Read(MacTLS_Context *ctx, void *buf, size_t len)
 {
-    unsigned char *src;
-    size_t         avail;
-
     if (ctx->state != kMacTLS_Connected &&
         ctx->state != kMacTLS_Closing) return -1;
 
+    if (ctx->tls13_active) {
+        /*
+         * TLS 1.3 read path.
+         *
+         * Return data from tls13_app_buf (populated by tls13_recv_records
+         * during MacTLS_Pump).
+         */
+        size_t avail = ctx->tls13_app_len - ctx->tls13_app_offset;
+        if (avail == 0) return 0;
+
+        if (len > avail) len = avail;
+        memcpy(buf, ctx->tls13_app_buf + ctx->tls13_app_offset, len);
+        ctx->tls13_app_offset += len;
+
+        return (int)len;
+    }
+
     /*
+     * TLS 1.2 read path (BearSSL).
+     *
      * Get BearSSL's recvapp buffer — this is where decrypted
      * plaintext lands after BearSSL processes incoming TLS records.
      */
-    src = br_ssl_engine_recvapp_buf(&ctx->sc.eng, &avail);
-    if (src == NULL || avail == 0) return 0;
+    {
+        unsigned char *src;
+        size_t avail;
 
-    if (len > avail) len = avail;
-    memcpy(buf, src, len);
+        src = br_ssl_engine_recvapp_buf(&ctx->sc.eng, &avail);
+        if (src == NULL || avail == 0) return 0;
 
-    /* Tell BearSSL we consumed len bytes */
-    br_ssl_engine_recvapp_ack(&ctx->sc.eng, len);
+        if (len > avail) len = avail;
+        memcpy(buf, src, len);
 
-    return (int)len;
+        /* Tell BearSSL we consumed len bytes */
+        br_ssl_engine_recvapp_ack(&ctx->sc.eng, len);
+
+        return (int)len;
+    }
 }
 
 size_t MacTLS_Available(const MacTLS_Context *ctx)
 {
-    unsigned char *buf;
-    size_t         avail;
-
     if (ctx->state != kMacTLS_Connected) return 0;
 
-    buf = br_ssl_engine_recvapp_buf(
-        &((MacTLS_Context *)ctx)->sc.eng, &avail);
-    return (buf != NULL) ? avail : 0;
+    if (ctx->tls13_active) {
+        return ctx->tls13_app_len - ctx->tls13_app_offset;
+    }
+
+    {
+        unsigned char *buf;
+        size_t avail;
+
+        buf = br_ssl_engine_recvapp_buf(
+            &((MacTLS_Context *)ctx)->sc.eng, &avail);
+        return (buf != NULL) ? avail : 0;
+    }
 }
 
 /* ── Status ── */

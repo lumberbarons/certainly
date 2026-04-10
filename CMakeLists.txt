@@ -17,6 +17,9 @@ add_library(certainly STATIC
     src/ot_transport.c
     src/entropy.c
     src/ca_roots.c
+    src/tls13_keysched.c
+    src/tls13_record.c
+    src/tls13_handshake.c
 )
 
 target_include_directories(certainly

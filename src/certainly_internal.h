@@ -61,8 +61,30 @@ struct MacTLS_Context {
     /* Config reference (NULL = use defaults) */
     const MacTLS_Config *config;
 
-    /* TLS 1.3 handshake context (only used during TLS 1.3 handshake) */
+    /* TLS 1.3 handshake context */
     tls13_hs_ctx    hs13;
+
+    /*
+     * TLS 1.3 application data buffers.
+     *
+     * During the TLS 1.3 data phase, we bypass BearSSL's engine entirely
+     * and handle record encryption/decryption ourselves. These buffers
+     * stage incoming encrypted records and decrypted plaintext.
+     *
+     * recv_buf: holds raw bytes from OT transport, consumed as complete
+     *           TLS records are parsed and decrypted.
+     * app_buf:  holds decrypted application data ready for MacTLS_Read().
+     */
+    unsigned char   tls13_recv_buf[16384 + 325]; /* max TLS record + header */
+    size_t          tls13_recv_len;               /* bytes currently in recv_buf */
+    unsigned char   tls13_app_buf[16384];         /* decrypted app data */
+    size_t          tls13_app_len;                /* bytes in app_buf */
+    size_t          tls13_app_offset;             /* read cursor in app_buf */
+
+    /* True once TLS 1.3 handshake is confirmed (ServerHello chose 1.3) */
+    bool            tls13_active;
+    /* True once TLS 1.3 handshake has started (ClientHello sent) */
+    bool            tls13_started;
 };
 
 struct MacTLS_Config {
