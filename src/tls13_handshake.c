@@ -1011,19 +1011,13 @@ static tls13_hs_result tls13_parse_server_hello(tls13_hs_ctx *hs,
  *     restart with BearSSL's T0 engine
  */
 static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
-                                                     br_ssl_engine_context *eng)
+                                                     unsigned char *recv_buf,
+                                                     size_t *recv_len)
 {
-    unsigned char *buf;
-    size_t len;
     uint8_t record_type;
     uint16_t record_len;
+    size_t total;
     tls13_hs_result result;
-
-    /* Try to read a record from BearSSL's receive buffer */
-    buf = br_ssl_engine_recvrec_buf(eng, &len);
-    if (buf == NULL || len == 0) {
-        return kTLS13_WantRead;
-    }
 
     /*
      * Parse the TLS record header (5 bytes):
@@ -1031,15 +1025,16 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
      *   legacy_record_version (2) — 0x0301 or 0x0303
      *   length (2)
      */
-    if (len < 5) {
+    if (*recv_len < 5) {
         return kTLS13_WantRead;
     }
 
-    record_type = buf[0];
-    record_len = get_u16(buf + 3);
+    record_type = recv_buf[0];
+    record_len = get_u16(recv_buf + 3);
+    total = (size_t)5 + record_len;
 
     /* Check we have the full record */
-    if (len < (size_t)(5 + record_len)) {
+    if (*recv_len < total) {
         return kTLS13_WantRead;
     }
 
@@ -1049,7 +1044,8 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
      * ignored. The CCS is just one byte: 0x01.
      */
     if (record_type == TLS13_CT_CHANGE_CIPHER_SPEC) {
-        br_ssl_engine_recvrec_ack(eng, 5 + record_len);
+        memmove(recv_buf, recv_buf + total, *recv_len - total);
+        *recv_len -= total;
         return kTLS13_WantRead;
     }
 
@@ -1064,10 +1060,11 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
      * The record payload (after the 5-byte header) is the handshake
      * message starting with the type byte.
      */
-    result = tls13_parse_server_hello(hs, buf + 5, record_len);
+    result = tls13_parse_server_hello(hs, recv_buf + 5, record_len);
 
-    /* Acknowledge the consumed record data */
-    br_ssl_engine_recvrec_ack(eng, 5 + record_len);
+    /* Consume the record from the front of the buffer */
+    memmove(recv_buf, recv_buf + total, *recv_len - total);
+    *recv_len -= total;
 
     return result;
 }
@@ -1093,32 +1090,32 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
  *   kTLS13_Error    — decryption or parse failure
  */
 static tls13_hs_result tls13_read_encrypted_hs(
-    tls13_hs_ctx *hs, br_ssl_engine_context *eng,
+    tls13_hs_ctx *hs, unsigned char *recv_buf, size_t *recv_len,
     uint8_t *out_hs_type, unsigned char *out_data, size_t *out_len)
 {
-    unsigned char *buf;
-    size_t len;
     uint8_t record_type;
     uint16_t record_len;
+    size_t total;
     uint8_t inner_ct;
     int ret;
 
     for (;;) {
-        buf = br_ssl_engine_recvrec_buf(eng, &len);
-        if (buf == NULL || len < 5) {
+        if (*recv_len < 5) {
             return kTLS13_WantRead;
         }
 
-        record_type = buf[0];
-        record_len = get_u16(buf + 3);
+        record_type = recv_buf[0];
+        record_len = get_u16(recv_buf + 3);
+        total = (size_t)5 + record_len;
 
-        if (len < (size_t)(5 + record_len)) {
+        if (*recv_len < total) {
             return kTLS13_WantRead;
         }
 
         /* Skip CCS records (middlebox compatibility) */
         if (record_type == TLS13_CT_CHANGE_CIPHER_SPEC) {
-            br_ssl_engine_recvrec_ack(eng, 5 + record_len);
+            memmove(recv_buf, recv_buf + total, *recv_len - total);
+            *recv_len -= total;
             continue;
         }
 
@@ -1134,15 +1131,16 @@ static tls13_hs_result tls13_read_encrypted_hs(
 
         /* Decrypt the record */
         ret = tls13_record_decrypt(&hs->read_ctx,
-                                   buf + 5, record_len,
+                                   recv_buf + 5, record_len,
                                    out_data, out_len, &inner_ct);
         if (ret != 0) {
             hs->error = BR_ERR_BAD_MAC;
             return kTLS13_Error;
         }
 
-        /* Acknowledge the consumed record */
-        br_ssl_engine_recvrec_ack(eng, 5 + record_len);
+        /* Consume the record from the front of the buffer */
+        memmove(recv_buf, recv_buf + total, *recv_len - total);
+        *recv_len -= total;
 
         /* The inner content type must be handshake (22) */
         if (inner_ct != TLS13_CT_HANDSHAKE) {
@@ -1173,14 +1171,14 @@ static tls13_hs_result tls13_read_encrypted_hs(
  *   Extension extensions<0..2^16-1>
  */
 static tls13_hs_result tls13_state_recv_encrypted_extensions(
-    tls13_hs_ctx *hs, br_ssl_engine_context *eng)
+    tls13_hs_ctx *hs, unsigned char *recv_buf, size_t *recv_len)
 {
     uint8_t hs_type;
     size_t msg_len;
     uint32_t body_len;
     tls13_hs_result r;
 
-    r = tls13_read_encrypted_hs(hs, eng, &hs_type,
+    r = tls13_read_encrypted_hs(hs, recv_buf, recv_len, &hs_type,
                                 hs->msg_buf, &msg_len);
     if (r != kTLS13_OK) return r;
 
@@ -1229,14 +1227,14 @@ static tls13_hs_result tls13_state_recv_encrypted_extensions(
  *   handler
  */
 static tls13_hs_result tls13_state_recv_cert_request_or_cert(
-    tls13_hs_ctx *hs, br_ssl_engine_context *eng)
+    tls13_hs_ctx *hs, unsigned char *recv_buf, size_t *recv_len)
 {
     uint8_t hs_type;
     size_t msg_len;
     uint32_t body_len;
     tls13_hs_result r;
 
-    r = tls13_read_encrypted_hs(hs, eng, &hs_type,
+    r = tls13_read_encrypted_hs(hs, recv_buf, recv_len, &hs_type,
                                 hs->msg_buf, &msg_len);
     if (r != kTLS13_OK) return r;
 
@@ -1320,7 +1318,7 @@ static void tls13_copy_pkey(tls13_hs_ctx *hs, const br_x509_pkey *src)
  * into hs->server_pkey for use in CertificateVerify.
  */
 static tls13_hs_result tls13_state_recv_certificate(
-    tls13_hs_ctx *hs, br_ssl_engine_context *eng,
+    tls13_hs_ctx *hs, unsigned char *recv_buf, size_t *recv_len,
     const char *hostname)
 {
     uint8_t hs_type;
@@ -1344,7 +1342,7 @@ static tls13_hs_result tls13_state_recv_certificate(
         hs->msg_len = 0;
         hs_type = hs->msg_buf[0];
     } else {
-        r = tls13_read_encrypted_hs(hs, eng, &hs_type,
+        r = tls13_read_encrypted_hs(hs, recv_buf, recv_len, &hs_type,
                                     hs->msg_buf, &msg_len);
         if (r != kTLS13_OK) return r;
     }
@@ -1521,7 +1519,7 @@ static int tls13_ct_memcmp(const void *a, const void *b, size_t len)
  * hash, NOT the raw hash.
  */
 static tls13_hs_result tls13_state_recv_certificate_verify(
-    tls13_hs_ctx *hs, br_ssl_engine_context *eng)
+    tls13_hs_ctx *hs, unsigned char *recv_buf, size_t *recv_len)
 {
     uint8_t hs_type;
     size_t msg_len;
@@ -1535,7 +1533,7 @@ static tls13_hs_result tls13_state_recv_certificate_verify(
     unsigned char content_hash[64];
     tls13_hs_result r;
 
-    r = tls13_read_encrypted_hs(hs, eng, &hs_type,
+    r = tls13_read_encrypted_hs(hs, recv_buf, recv_len, &hs_type,
                                 hs->msg_buf, &msg_len);
     if (r != kTLS13_OK) return r;
 
@@ -1711,7 +1709,7 @@ static tls13_hs_result tls13_state_recv_certificate_verify(
  *    now includes this Finished message
  */
 static tls13_hs_result tls13_state_recv_finished(
-    tls13_hs_ctx *hs, br_ssl_engine_context *eng)
+    tls13_hs_ctx *hs, unsigned char *recv_buf, size_t *recv_len)
 {
     uint8_t hs_type;
     size_t msg_len;
@@ -1728,7 +1726,7 @@ static tls13_hs_result tls13_state_recv_finished(
     size_t key_len;
     tls13_hs_result r;
 
-    r = tls13_read_encrypted_hs(hs, eng, &hs_type,
+    r = tls13_read_encrypted_hs(hs, recv_buf, recv_len, &hs_type,
                                 hs->msg_buf, &msg_len);
     if (r != kTLS13_OK) return r;
 
@@ -1876,8 +1874,7 @@ static tls13_hs_result tls13_state_recv_finished(
  * by the RecvFinished handler (the handshake secret is no longer needed
  * at that point). Layout: [key (key_len bytes)] [iv (12 bytes)].
  */
-static tls13_hs_result tls13_state_send_finished(tls13_hs_ctx *hs,
-                                                  br_ssl_engine_context *eng)
+static tls13_hs_result tls13_state_send_finished(tls13_hs_ctx *hs)
 {
     unsigned char finished_key[64];
     unsigned char transcript_hash[64];
@@ -1890,8 +1887,6 @@ static tls13_hs_result tls13_state_send_finished(tls13_hs_ctx *hs,
     size_t hs_msg_len;
     unsigned char ciphertext[4 + 64 + 1 + TLS13_TAG_SIZE]; /* encrypted payload */
     size_t ct_len;
-    unsigned char *sendrec_buf;
-    size_t sendrec_avail;
     int ret;
 
     hash_len = hs->transcript.hash_len;
@@ -1947,19 +1942,17 @@ static tls13_hs_result tls13_state_send_finished(tls13_hs_ctx *hs,
     }
 
     /*
-     * Step 6: Write the encrypted record to BearSSL's sendrec buffer.
+     * Step 6: Write the encrypted record directly into hs->msg_buf.
      * Format: content_type(0x17) + version(0x0303) + length(2) + ciphertext
      *
-     * We use the sendrec buffer as a convenient staging area. The pump
-     * loop will drain it to OT transport.
+     * The pump loop will drain hs->msg_buf to OT transport.
      */
-    sendrec_buf = br_ssl_engine_sendrec_buf(eng, &sendrec_avail);
-    if (sendrec_buf == NULL || sendrec_avail < 5 + ct_len) {
-        /* Not enough space — try again later */
+    if (5 + ct_len > sizeof(hs->msg_buf)) {
         secure_wipe(finished_key, sizeof(finished_key));
         secure_wipe(transcript_hash, sizeof(transcript_hash));
         secure_wipe(verify_data, sizeof(verify_data));
-        return kTLS13_WantWrite;
+        hs->error = BR_ERR_TOO_LARGE;
+        return kTLS13_Error;
     }
 
     /* Build the TLS record: outer type 0x17 (application_data), version 0x0303 */
@@ -2081,12 +2074,17 @@ tls13_hs_result tls13_handle_post_handshake(tls13_hs_ctx *hs,
  * then advances to kTLS13_SendCCS.
  */
 static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
-                                                     br_ssl_engine_context *eng,
                                                      const char *hostname)
 {
+    br_ssl_engine_context *eng = hs->eng;
     br_hmac_drbg_context rng;
     unsigned char seed[32];
     int ret;
+
+    if (eng == NULL) {
+        hs->error = BR_ERR_BAD_STATE;
+        return kTLS13_Error;
+    }
 
     /*
      * Initialize a standalone PRNG for key generation and random bytes.
@@ -2178,12 +2176,13 @@ static tls13_hs_result tls13_state_send_ccs(tls13_hs_ctx *hs)
  *   kTLS13_Error     — handshake failed, check hs->error
  */
 tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
-                                     br_ssl_engine_context *eng,
+                                     unsigned char *recv_buf,
+                                     size_t *recv_len,
                                      const char *hostname)
 {
     switch (hs->state) {
     case kTLS13_SendClientHello: {
-        tls13_hs_result r = tls13_state_send_client_hello(hs, eng, hostname);
+        tls13_hs_result r = tls13_state_send_client_hello(hs, hostname);
         if (r == kTLS13_WantWrite) {
             hs->state = kTLS13_SendCCS;
         }
@@ -2199,7 +2198,7 @@ tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
     }
 
     case kTLS13_RecvServerHello: {
-        tls13_hs_result r = tls13_state_recv_server_hello(hs, eng);
+        tls13_hs_result r = tls13_state_recv_server_hello(hs, recv_buf, recv_len);
         if (r == kTLS13_OK) {
             /* TLS 1.3 ServerHello processed — advance to encrypted phase */
             hs->state = kTLS13_RecvEncryptedExtensions;
@@ -2217,22 +2216,22 @@ tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
     }
 
     case kTLS13_RecvEncryptedExtensions:
-        return tls13_state_recv_encrypted_extensions(hs, eng);
+        return tls13_state_recv_encrypted_extensions(hs, recv_buf, recv_len);
 
     case kTLS13_RecvCertRequestOrCert:
-        return tls13_state_recv_cert_request_or_cert(hs, eng);
+        return tls13_state_recv_cert_request_or_cert(hs, recv_buf, recv_len);
 
     case kTLS13_RecvCertificate:
-        return tls13_state_recv_certificate(hs, eng, hostname);
+        return tls13_state_recv_certificate(hs, recv_buf, recv_len, hostname);
 
     case kTLS13_RecvCertificateVerify:
-        return tls13_state_recv_certificate_verify(hs, eng);
+        return tls13_state_recv_certificate_verify(hs, recv_buf, recv_len);
 
     case kTLS13_RecvFinished:
-        return tls13_state_recv_finished(hs, eng);
+        return tls13_state_recv_finished(hs, recv_buf, recv_len);
 
     case kTLS13_SendFinished:
-        return tls13_state_send_finished(hs, eng);
+        return tls13_state_send_finished(hs);
 
     case kTLS13_Complete:
         return kTLS13_OK;

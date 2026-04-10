@@ -125,6 +125,15 @@ typedef struct {
     /* X.509 validation context (pointer to MacTLS_Context's xc) */
     const br_x509_class **x509_ctx;
 
+    /*
+     * BearSSL engine pointer — used only for PRNG seeding during
+     * ClientHello construction. The handshake does NOT drive record
+     * I/O through this engine; that is done directly against a
+     * caller-supplied recv buffer. This field is allowed to be NULL
+     * if the caller arranges RNG seeding some other way.
+     */
+    br_ssl_engine_context *eng;
+
     /* Server's public key (from certificate, for CertificateVerify) */
     br_x509_pkey        server_pkey;
     /* Backing storage for server_pkey's pointer fields */
@@ -134,9 +143,18 @@ typedef struct {
     int                 error;
 } tls13_hs_ctx;
 
-/* Main handshake driver — call repeatedly from the pump loop */
+/*
+ * Main handshake driver — call repeatedly from the pump loop.
+ *
+ * recv_buf / recv_len is a caller-owned buffer holding raw bytes received
+ * from the network. The handshake consumes complete TLS records from the
+ * front of the buffer and slides the remaining bytes down, updating
+ * *recv_len to reflect what's still unread. Callers should append newly
+ * received bytes to recv_buf at offset *recv_len before calling this.
+ */
 tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
-                                     br_ssl_engine_context *eng,
+                                     unsigned char *recv_buf,
+                                     size_t *recv_len,
                                      const char *hostname);
 
 /* Initialize handshake context */

@@ -123,15 +123,18 @@ static void setup_bearssl(MacTLS_Context *ctx)
      */
     tls13_handshake_init(&ctx->hs13);
     ctx->hs13.x509_ctx = (const br_x509_class **)&ctx->xc.vtable;
+    /* The TLS 1.3 handshake borrows BearSSL's engine only for its PRNG. */
+    ctx->hs13.eng = &ctx->sc.eng;
 
     /*
-     * Start BearSSL's TLS 1.2 engine. This is needed both for:
-     *   1. TLS 1.2 fallback (if server doesn't support 1.3)
-     *   2. Providing the engine's PRNG for our TLS 1.3 code
-     *
-     * The T0 engine will be dormant unless we fall back to 1.2.
+     * NOTE: We deliberately do NOT call br_ssl_client_reset() here.
+     * The TLS 1.3 handshake is driven by our own state machine, which
+     * reads records directly from ctx->tls13_recv_buf rather than from
+     * BearSSL's engine. Starting BearSSL's T0 handshake at this point
+     * would put the engine in a state where it competes with us for
+     * record I/O buffers. br_ssl_client_reset() is only called on the
+     * TLS 1.2 fallback path (see tls13_pump_handshake / kTLS13_Fallback12).
      */
-    br_ssl_client_reset(&ctx->sc, ctx->host, 0);
 }
 
 /* ── Connection lifecycle ── */
@@ -187,18 +190,15 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
  *
  * This function handles the TLS 1.3 handshake by:
  *   1. Sending outgoing data from hs13.msg_buf via OT transport
- *   2. Receiving incoming data into BearSSL's recvrec buffer
+ *   2. Receiving incoming data into ctx->tls13_recv_buf (the same buffer
+ *      used for application-data records post-handshake)
  *   3. Calling tls13_handshake_step() to advance the state machine
  *
  * Returns the resulting MacTLS_State.
  *
- * For the TLS 1.3 handshake, we use a hybrid approach:
- *   - Outgoing data: sent directly via OT transport from hs13.msg_buf
- *   - Incoming data: read into BearSSL's recvrec buffer (the handshake
- *     code uses br_ssl_engine_recvrec_buf/ack to parse records)
- *
- * This works because the TLS 1.3 handshake code was designed to read
- * from recvrec (for record framing) but writes its own records.
+ * The TLS 1.3 handshake code never touches BearSSL's engine for record
+ * I/O — it reads directly from the recv_buf we pass in and consumes
+ * complete records by sliding them off the front of the buffer.
  */
 static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
 {
@@ -228,35 +228,37 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
     }
 
     /*
-     * Step 2: Read incoming data into BearSSL's recvrec buffer.
-     * The TLS 1.3 handshake code reads records from here.
+     * Step 2: Read incoming data into our dedicated tls13_recv_buf.
+     * The TLS 1.3 handshake code reads records from here directly.
      */
-    {
-        unsigned char *buf;
-        size_t len;
-
-        buf = br_ssl_engine_recvrec_buf(&ctx->sc.eng, &len);
-        if (buf != NULL && len > 0) {
-            n = ot_transport_recv(ctx->transport, buf, len);
-            if (n > 0) {
-                br_ssl_engine_recvrec_ack(&ctx->sc.eng, n);
-            } else if (n < 0) {
-                if (ctx->transport->ordRelReceived ||
-                    ctx->transport->disconnectReceived) {
-                    ctx->state = kMacTLS_Closed;
-                    return ctx->state;
-                }
-                ctx->state = kMacTLS_Error;
-                ctx->error = kMacTLS_ErrRead;
+    if (ctx->tls13_recv_len < sizeof(ctx->tls13_recv_buf)) {
+        size_t space = sizeof(ctx->tls13_recv_buf) - ctx->tls13_recv_len;
+        n = ot_transport_recv(ctx->transport,
+                              ctx->tls13_recv_buf + ctx->tls13_recv_len,
+                              space);
+        if (n > 0) {
+            ctx->tls13_recv_len += (size_t)n;
+        } else if (n < 0) {
+            if (ctx->transport->ordRelReceived ||
+                ctx->transport->disconnectReceived) {
+                ctx->state = kMacTLS_Closed;
                 return ctx->state;
             }
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrRead;
+            return ctx->state;
         }
     }
 
     /*
      * Step 3: Advance the TLS 1.3 handshake state machine.
+     * The handshake consumes complete records from the front of
+     * tls13_recv_buf and updates tls13_recv_len accordingly.
      */
-    r = tls13_handshake_step(&ctx->hs13, &ctx->sc.eng, ctx->host);
+    r = tls13_handshake_step(&ctx->hs13,
+                             ctx->tls13_recv_buf,
+                             &ctx->tls13_recv_len,
+                             ctx->host);
 
     switch (r) {
     case kTLS13_OK:
