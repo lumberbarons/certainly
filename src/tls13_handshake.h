@@ -142,4 +142,11 @@ tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
 /* Initialize handshake context */
 void tls13_handshake_init(tls13_hs_ctx *hs);
 
+/* Handle post-handshake messages (NewSessionTicket, KeyUpdate).
+ * Called when an encrypted record with inner content type handshake (22)
+ * is received during the application data phase. */
+tls13_hs_result tls13_handle_post_handshake(tls13_hs_ctx *hs,
+                                            const unsigned char *data,
+                                            size_t data_len);
+
 #endif /* CERTAINLY_TLS13_HANDSHAKE_H */

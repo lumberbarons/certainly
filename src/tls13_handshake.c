@@ -1806,20 +1806,35 @@ static tls13_hs_result tls13_state_recv_finished(
     /*
      * Install server application keys for reading.
      * Client application keys will be installed after we send
-     * our own Finished message (Task 7).
-     *
-     * Store client app keys in the record context for now —
-     * the write_ctx will be re-initialized with them in Task 7
-     * after sending client Finished.
+     * our own Finished message.
      */
     tls13_record_init(&hs->read_ctx,
                       server_key, key_len, server_iv, hs->cipher_suite);
 
     /*
+     * Pre-derive the client finished key BEFORE overwriting
+     * client_hs_secret with the app keys. The client Finished
+     * message needs HMAC(finished_key, transcript_hash) where
+     * finished_key is derived from the client handshake secret.
+     * We stash the finished key in server_hs_secret (which is
+     * no longer needed — the server's finished key was a local
+     * variable).
+     */
+    {
+        unsigned char client_finished_key[64];
+        tls13_ks_derive_finished_key(&hs->ks, hs->client_hs_secret,
+                                     client_finished_key);
+        memcpy(hs->server_hs_secret, client_finished_key,
+               hs->transcript.hash_len);
+        secure_wipe(client_finished_key, sizeof(client_finished_key));
+    }
+
+    /*
      * Save client app keys temporarily in client_hs_secret area
-     * (no longer needed for handshake). Task 7 will use these
-     * to set up the write_ctx after sending client Finished.
-     * Layout: [key (up to 32)] [iv (12)] stored in client_hs_secret.
+     * (the original handshake secret is no longer needed — we just
+     * derived the finished key above). SendFinished will use these
+     * to set up write_ctx after sending client Finished.
+     * Layout: [key (up to 32 bytes)] [iv (12 bytes)].
      */
     memcpy(hs->client_hs_secret, client_key, key_len);
     memcpy(hs->client_hs_secret + key_len, client_iv, 12);
@@ -1833,10 +1848,223 @@ static tls13_hs_result tls13_state_recv_finished(
     secure_wipe(client_iv, sizeof(client_iv));
     secure_wipe(server_key, sizeof(server_key));
     secure_wipe(server_iv, sizeof(server_iv));
-    secure_wipe(hs->server_hs_secret, sizeof(hs->server_hs_secret));
 
     hs->state = kTLS13_SendFinished;
     return kTLS13_OK;
+}
+
+/* ── Client Finished + Application Key Switch ── */
+
+/*
+ * Handle the kTLS13_SendFinished state.
+ *
+ * Sends our Finished message encrypted with the client handshake keys,
+ * then switches write_ctx to application keys.
+ *
+ * Steps:
+ * 1. Derive client finished_key from client handshake traffic secret
+ * 2. Snapshot transcript hash (includes everything through server Finished)
+ * 3. Compute verify_data = HMAC(finished_key, transcript_hash)
+ * 4. Build the Finished handshake message (type 20 + uint24 length + verify_data)
+ * 5. Encrypt it with client handshake keys
+ * 6. Write the encrypted record (with 5-byte TLS record header) to BearSSL's sendrec buffer
+ * 7. Update transcript with the unencrypted Finished message
+ * 8. Switch write_ctx to application keys
+ * 9. Advance state to kTLS13_Complete
+ *
+ * Note: The client application keys were stashed in client_hs_secret
+ * by the RecvFinished handler (the handshake secret is no longer needed
+ * at that point). Layout: [key (key_len bytes)] [iv (12 bytes)].
+ */
+static tls13_hs_result tls13_state_send_finished(tls13_hs_ctx *hs,
+                                                  br_ssl_engine_context *eng)
+{
+    unsigned char finished_key[64];
+    unsigned char transcript_hash[64];
+    unsigned char verify_data[64];
+    br_hmac_key_context hmac_kc;
+    br_hmac_context hmac_ctx;
+    size_t hash_len;
+    size_t key_len;
+    unsigned char hs_msg[4 + 64]; /* type(1) + uint24 len(3) + verify_data(up to 64) */
+    size_t hs_msg_len;
+    unsigned char ciphertext[4 + 64 + 1 + TLS13_TAG_SIZE]; /* encrypted payload */
+    size_t ct_len;
+    unsigned char *sendrec_buf;
+    size_t sendrec_avail;
+    int ret;
+
+    hash_len = hs->transcript.hash_len;
+    key_len = tls13_key_len_for_suite(hs->cipher_suite);
+
+    /*
+     * Step 1: Retrieve the client finished_key.
+     *
+     * RecvFinished pre-derived this from the client handshake secret
+     * and stashed it in server_hs_secret[0..hash_len-1], because
+     * client_hs_secret was about to be overwritten with the application
+     * key material.
+     */
+    memcpy(finished_key, hs->server_hs_secret, hash_len);
+
+    /*
+     * Step 2: Snapshot the transcript hash.
+     * This hash includes everything through the server's Finished message.
+     */
+    tls13_transcript_snapshot(&hs->transcript, transcript_hash);
+
+    /*
+     * Step 3: Compute verify_data = HMAC(finished_key, transcript_hash).
+     */
+    br_hmac_key_init(&hmac_kc, hs->transcript.hash, finished_key, hash_len);
+    br_hmac_init(&hmac_ctx, &hmac_kc, 0);
+    br_hmac_update(&hmac_ctx, transcript_hash, hash_len);
+    br_hmac_out(&hmac_ctx, verify_data);
+
+    /*
+     * Step 4: Build the Finished handshake message.
+     * Format: type(1) + uint24_length(3) + verify_data(hash_len)
+     */
+    hs_msg[0] = TLS13_HT_FINISHED;      /* type = 20 */
+    put_u24(hs_msg + 1, (uint32_t)hash_len);
+    memcpy(hs_msg + 4, verify_data, hash_len);
+    hs_msg_len = 4 + hash_len;
+
+    /*
+     * Step 5: Encrypt the Finished message using the client handshake keys.
+     * The write_ctx still has the client handshake keys at this point.
+     */
+    ret = tls13_record_encrypt(&hs->write_ctx,
+                               hs_msg, hs_msg_len,
+                               TLS13_CT_HANDSHAKE,
+                               ciphertext, &ct_len);
+    if (ret != 0) {
+        hs->error = BR_ERR_BAD_STATE;
+        secure_wipe(finished_key, sizeof(finished_key));
+        secure_wipe(transcript_hash, sizeof(transcript_hash));
+        secure_wipe(verify_data, sizeof(verify_data));
+        return kTLS13_Error;
+    }
+
+    /*
+     * Step 6: Write the encrypted record to BearSSL's sendrec buffer.
+     * Format: content_type(0x17) + version(0x0303) + length(2) + ciphertext
+     *
+     * We use the sendrec buffer as a convenient staging area. The pump
+     * loop will drain it to OT transport.
+     */
+    sendrec_buf = br_ssl_engine_sendrec_buf(eng, &sendrec_avail);
+    if (sendrec_buf == NULL || sendrec_avail < 5 + ct_len) {
+        /* Not enough space — try again later */
+        secure_wipe(finished_key, sizeof(finished_key));
+        secure_wipe(transcript_hash, sizeof(transcript_hash));
+        secure_wipe(verify_data, sizeof(verify_data));
+        return kTLS13_WantWrite;
+    }
+
+    /* Build the TLS record: outer type 0x17 (application_data), version 0x0303 */
+    hs->msg_buf[0] = TLS13_CT_APPLICATION_DATA;  /* 0x17 */
+    hs->msg_buf[1] = 0x03;
+    hs->msg_buf[2] = 0x03;
+    put_u16(hs->msg_buf + 3, (uint16_t)ct_len);
+    memcpy(hs->msg_buf + 5, ciphertext, ct_len);
+    hs->msg_len = 5 + ct_len;
+    hs->msg_offset = 0;
+
+    /*
+     * Step 7: Update transcript with the unencrypted Finished message.
+     * The transcript includes the handshake message bytes (type + length
+     * + verify_data), NOT the TLS record header or encryption.
+     */
+    tls13_transcript_update(&hs->transcript, hs_msg, hs_msg_len);
+
+    /*
+     * Step 8: Switch write_ctx to application keys.
+     * The client application keys were stashed in client_hs_secret by
+     * RecvFinished: [key (key_len bytes)] [iv (12 bytes)].
+     */
+    tls13_record_init(&hs->write_ctx,
+                      hs->client_hs_secret, key_len,
+                      hs->client_hs_secret + key_len,
+                      hs->cipher_suite);
+
+    /* Wipe all sensitive intermediates */
+    secure_wipe(finished_key, sizeof(finished_key));
+    secure_wipe(transcript_hash, sizeof(transcript_hash));
+    secure_wipe(verify_data, sizeof(verify_data));
+    secure_wipe(hs->client_hs_secret, sizeof(hs->client_hs_secret));
+    secure_wipe(hs->server_hs_secret, sizeof(hs->server_hs_secret));
+
+    /*
+     * Step 9: Advance state to Complete.
+     * The caller must still drain msg_buf to the network.
+     */
+    hs->state = kTLS13_Complete;
+    return kTLS13_WantWrite;
+}
+
+/* ── Post-Handshake Message Handling ── */
+
+/*
+ * Handle post-handshake messages received after the handshake completes.
+ *
+ * After the TLS 1.3 handshake finishes, the server may send encrypted
+ * handshake messages during the application data phase:
+ *
+ *   - NewSessionTicket (type 4): Session resumption data. We don't
+ *     support session resumption, so these are silently discarded.
+ *
+ *   - KeyUpdate (type 24): Requests re-keying. We don't support
+ *     post-handshake key updates, so we treat this as a fatal error
+ *     (connection close). In practice, most servers don't send KeyUpdate
+ *     within the first few requests.
+ *
+ * Parameters:
+ *   data     — decrypted record payload (inner content type already stripped)
+ *   data_len — length of the decrypted payload
+ *
+ * Returns:
+ *   kTLS13_OK    — message handled (e.g., NewSessionTicket discarded)
+ *   kTLS13_Error — unrecoverable error (e.g., KeyUpdate or unknown type)
+ */
+tls13_hs_result tls13_handle_post_handshake(tls13_hs_ctx *hs,
+                                            const unsigned char *data,
+                                            size_t data_len)
+{
+    uint8_t msg_type;
+
+    if (data_len < 1) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
+    }
+
+    msg_type = data[0];
+
+    switch (msg_type) {
+    case TLS13_HT_NEW_SESSION_TICKET:
+        /*
+         * NewSessionTicket — silently discard.
+         * We don't support session resumption (PSK), so there's nothing
+         * to store. The server sends these speculatively; ignoring them
+         * is perfectly valid per RFC 8446.
+         */
+        return kTLS13_OK;
+
+    case TLS13_HT_KEY_UPDATE:
+        /*
+         * KeyUpdate — treat as connection close.
+         * Supporting key updates would require re-deriving traffic keys
+         * mid-connection. For a simple REST client making short-lived
+         * connections, this is unnecessary complexity.
+         */
+        hs->error = BR_ERR_UNEXPECTED;
+        return kTLS13_Error;
+
+    default:
+        /* Unknown post-handshake message type */
+        hs->error = BR_ERR_UNEXPECTED;
+        return kTLS13_Error;
+    }
 }
 
 /* ── Handshake State Machine ── */
@@ -2004,8 +2232,7 @@ tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
         return tls13_state_recv_finished(hs, eng);
 
     case kTLS13_SendFinished:
-        /* TODO: Task 7 */
-        return kTLS13_WantWrite;
+        return tls13_state_send_finished(hs, eng);
 
     case kTLS13_Complete:
         return kTLS13_OK;
