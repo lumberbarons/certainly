@@ -252,14 +252,59 @@ int http_build_request(const char *method, const char *host,
     return (int)(cur - out_buf);
 }
 
+/*
+ * Split a raw HTTP/1.1 response into status line, headers, and body
+ * regions. All outputs are pointers into the caller's `raw` buffer;
+ * no copies are made, and the lifetime of the outputs is tied to
+ * `raw`.
+ *
+ * status_line   = bytes up to the first \r\n (not including the CRLF)
+ * headers       = bytes between the status CRLF and the blank-line
+ *                 terminator (not including either CRLF)
+ * body          = bytes after the \r\n\r\n terminator, to end of input
+ *
+ * Returns 0 on success, -1 on any failure (NULL input, too short, no
+ * status-line terminator, or no blank-line terminator). On failure the
+ * output pointers/lengths are unspecified — callers must check the
+ * return code first.
+ */
 int http_split_response(const char *raw, size_t raw_len,
                         const char **status_line_out, size_t *status_len_out,
                         const char **headers_out,     size_t *headers_len_out,
                         const char **body_out,        size_t *body_len_out)
 {
-    (void)raw; (void)raw_len;
-    (void)status_line_out; (void)status_len_out;
-    (void)headers_out;     (void)headers_len_out;
-    (void)body_out;        (void)body_len_out;
-    return -1;  /* filled in by Task 5 */
+    if (raw == NULL || raw_len < 4) return -1;
+
+    /* Find end of status line: first "\r\n". */
+    size_t i = 0;
+    while (i + 1 < raw_len && !(raw[i] == '\r' && raw[i + 1] == '\n'))
+        i++;
+    if (i + 1 >= raw_len) return -1;  /* no CRLF */
+
+    const char *status      = raw;
+    size_t      status_len  = i;
+
+    /* Find end of headers: first "\r\n\r\n" at or after position i. */
+    size_t j = i;
+    while (j + 3 < raw_len &&
+           !(raw[j]   == '\r' && raw[j + 1] == '\n' &&
+             raw[j+2] == '\r' && raw[j + 3] == '\n'))
+        j++;
+    if (j + 3 >= raw_len) return -1;  /* no blank-line terminator */
+
+    /* Headers region is the bytes between the status-line CRLF
+     * and the blank-line CRLF, NOT including either terminator. */
+    const char *headers     = raw + (i + 2);        /* skip status CRLF */
+    size_t      headers_len = (j > (i + 2)) ? (j - (i + 2)) : 0;
+
+    const char *body        = raw + (j + 4);        /* skip "\r\n\r\n" */
+    size_t      body_len    = raw_len - (j + 4);
+
+    *status_line_out = status;
+    *status_len_out  = status_len;
+    *headers_out     = headers;
+    *headers_len_out = headers_len;
+    *body_out        = body;
+    *body_len_out    = body_len;
+    return 0;
 }

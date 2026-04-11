@@ -234,11 +234,72 @@ static void test_build_request(void)
     EXPECT_EQ_INT("build: overflow", -1, n);
 }
 
+static void test_split_response(void)
+{
+    const char *raw =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Content-Length: 13\r\n"
+        "\r\n"
+        "hello, world!";
+    size_t raw_len = strlen(raw);
+
+    const char *status; size_t status_len;
+    const char *headers; size_t headers_len;
+    const char *body; size_t body_len;
+
+    int rc = http_split_response(raw, raw_len,
+                                 &status, &status_len,
+                                 &headers, &headers_len,
+                                 &body, &body_len);
+    EXPECT_EQ_INT("split: 200 rc", 0, rc);
+    EXPECT_EQ_INT("split: status len", 15, (int)status_len);
+    EXPECT_EQ_MEM("split: status",     "HTTP/1.1 200 OK", status, 15);
+    EXPECT_EQ_INT("split: headers len", 43, (int)headers_len);
+    EXPECT_EQ_INT("split: body len",    13, (int)body_len);
+    EXPECT_EQ_MEM("split: body",        "hello, world!", body, 13);
+
+    /* Empty body */
+    const char *raw2 =
+        "HTTP/1.1 204 No Content\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    rc = http_split_response(raw2, strlen(raw2),
+                             &status, &status_len,
+                             &headers, &headers_len,
+                             &body, &body_len);
+    EXPECT_EQ_INT("split: 204 rc",         0,  rc);
+    EXPECT_EQ_INT("split: 204 status len", 23, (int)status_len);
+    EXPECT_EQ_INT("split: 204 body len",   0,  (int)body_len);
+
+    /* No CRLF at all → error */
+    rc = http_split_response("garbage no crlf", 15,
+                             &status, &status_len,
+                             &headers, &headers_len,
+                             &body, &body_len);
+    EXPECT_EQ_INT("split: no crlf", -1, rc);
+
+    /* Has CRLF but no blank-line terminator → error */
+    rc = http_split_response("HTTP/1.1 200 OK\r\nFoo: bar\r\n", 27,
+                             &status, &status_len,
+                             &headers, &headers_len,
+                             &body, &body_len);
+    EXPECT_EQ_INT("split: no blank line", -1, rc);
+
+    /* Empty input → error */
+    rc = http_split_response("", 0,
+                             &status, &status_len,
+                             &headers, &headers_len,
+                             &body, &body_len);
+    EXPECT_EQ_INT("split: empty", -1, rc);
+}
+
 int main(void)
 {
     test_smoke();
     test_parse_url();
     test_build_request();
+    test_split_response();
 
     printf("\n%d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
