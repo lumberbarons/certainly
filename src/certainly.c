@@ -205,8 +205,6 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
     tls13_hs_result r;
     int n;
 
-    ctx->dbg_pump_count++;
-
     /*
      * Step 1: If there's outgoing data in msg_buf, send it.
      * The handshake code fills msg_buf and returns WantWrite.
@@ -217,22 +215,11 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
      */
     if (ctx->hs13.msg_offset < ctx->hs13.msg_len) {
         size_t remaining = ctx->hs13.msg_len - ctx->hs13.msg_offset;
-        ctx->dbg_send_block_enters++;
-        if (ctx->hs13.msg_len > ctx->dbg_send_block_max_msg_len) {
-            ctx->dbg_send_block_max_msg_len = ctx->hs13.msg_len;
-        }
-        /* Capture first 16 bytes of the first-ever send for debugging */
-        if (!ctx->dbg_first_send_captured && ctx->hs13.msg_offset == 0) {
-            size_t cap = ctx->hs13.msg_len < 16 ? ctx->hs13.msg_len : 16;
-            memcpy(ctx->dbg_first_send, ctx->hs13.msg_buf, cap);
-            ctx->dbg_first_send_captured = true;
-        }
         n = ot_transport_send(ctx->transport,
                               ctx->hs13.msg_buf + ctx->hs13.msg_offset,
                               remaining);
         if (n > 0) {
             ctx->hs13.msg_offset += n;
-            ctx->dbg_total_sent += (size_t)n;
         } else if (n < 0) {
             ctx->state = kMacTLS_Error;
             ctx->error = kMacTLS_ErrWrite;
@@ -259,7 +246,6 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
                               space);
         if (n > 0) {
             ctx->tls13_recv_len += (size_t)n;
-            ctx->dbg_total_recv += (size_t)n;
         } else if (n < 0) {
             /*
              * OT reports no more data. If the peer has closed,
@@ -378,9 +364,6 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
          * Switch to connected state. From here, MacTLS_Read/Write
          * will use the TLS 1.3 record layer directly.
          */
-        if (ctx->state != kMacTLS_Connected) {
-            ctx->dbg_recv_len_at_connected = ctx->tls13_recv_len;
-        }
         ctx->state = kMacTLS_Connected;
         ctx->tls13_active = true;
     }
@@ -402,7 +385,6 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
 static void tls13_recv_records(MacTLS_Context *ctx)
 {
     int n;
-    ctx->dbg_recv_records_calls++;
 
     /*
      * Step 1: Read raw bytes from OT transport into recv_buf.
@@ -492,14 +474,10 @@ static void tls13_recv_records(MacTLS_Context *ctx)
                                    ctx->tls13_recv_buf + 5, record_len,
                                    decrypted, &dec_len, &inner_ct);
         if (ret != 0) {
-            ctx->dbg_decrypt_failures++;
             ctx->state = kMacTLS_Error;
             ctx->error = kMacTLS_ErrRead;
             return;
         }
-
-        ctx->dbg_post_records++;
-        ctx->dbg_last_inner_ct = inner_ct;
 
         /* Consume the record from recv_buf */
         memmove(ctx->tls13_recv_buf,
@@ -511,7 +489,6 @@ static void tls13_recv_records(MacTLS_Context *ctx)
          * Dispatch based on the inner (real) content type.
          */
         if (inner_ct == TLS13_CT_APPLICATION_DATA) {
-            ctx->dbg_app_records++;
             /*
              * Application data — append to app_buf for MacTLS_Read().
              *
@@ -537,13 +514,9 @@ static void tls13_recv_records(MacTLS_Context *ctx)
                 memcpy(ctx->tls13_app_buf + ctx->tls13_app_len,
                        decrypted, copy);
                 ctx->tls13_app_len += copy;
-                if (ctx->tls13_app_len > ctx->dbg_max_app_len) {
-                    ctx->dbg_max_app_len = ctx->tls13_app_len;
-                }
             }
 
         } else if (inner_ct == TLS13_CT_HANDSHAKE) {
-            ctx->dbg_hs_records++;
             /*
              * Post-handshake message (NewSessionTicket, KeyUpdate, etc.)
              * Dispatch to the post-handshake handler.
@@ -558,7 +531,6 @@ static void tls13_recv_records(MacTLS_Context *ctx)
             /* kTLS13_OK means the message was handled (e.g., discarded) */
 
         } else if (inner_ct == TLS13_CT_ALERT) {
-            ctx->dbg_alert_records++;
             /*
              * Decrypted alert — treat as connection close.
              */
@@ -876,11 +848,9 @@ void MacTLS_Close(MacTLS_Context *ctx)
 
 int MacTLS_Write(MacTLS_Context *ctx, const void *data, size_t len)
 {
-    ctx->dbg_write_calls++;
     if (ctx->state != kMacTLS_Connected) return -1;
 
     if (ctx->tls13_active) {
-        ctx->dbg_write_bytes += len;
         /*
          * TLS 1.3 write path.
          *
@@ -1063,66 +1033,6 @@ int MacTLS_GetBearSSLError(const MacTLS_Context *ctx)
 {
     return br_ssl_engine_last_error(&((MacTLS_Context *)ctx)->sc.eng);
 }
-
-int MacTLS_GetTLS13State(const MacTLS_Context *ctx)
-{
-    return (int)ctx->hs13.state;
-}
-
-int MacTLS_GetTLS13Error(const MacTLS_Context *ctx)
-{
-    return ctx->hs13.error;
-}
-
-size_t MacTLS_GetTLS13MsgLen(const MacTLS_Context *ctx)
-{
-    return ctx->hs13.msg_len;
-}
-
-size_t MacTLS_GetTLS13MsgOffset(const MacTLS_Context *ctx)
-{
-    return ctx->hs13.msg_offset;
-}
-
-size_t MacTLS_GetTLS13RecvLen(const MacTLS_Context *ctx)
-{
-    return ctx->tls13_recv_len;
-}
-
-const unsigned char *MacTLS_GetTLS13RecvBuf(const MacTLS_Context *ctx)
-{
-    return ctx->tls13_recv_buf;
-}
-
-size_t MacTLS_GetDbgTotalSent(const MacTLS_Context *ctx) { return ctx->dbg_total_sent; }
-size_t MacTLS_GetDbgTotalRecv(const MacTLS_Context *ctx) { return ctx->dbg_total_recv; }
-size_t MacTLS_GetDbgPumpCount(const MacTLS_Context *ctx) { return ctx->dbg_pump_count; }
-
-const unsigned char *MacTLS_GetDbgFirstSend(const MacTLS_Context *ctx)
-{
-    return ctx->dbg_first_send;
-}
-
-int MacTLS_GetDbgRecordsDecrypted(const MacTLS_Context *ctx) { return ctx->hs13.dbg_records_decrypted; }
-int MacTLS_GetDbgLastHsType(const MacTLS_Context *ctx) { return ctx->hs13.dbg_last_hs_type; }
-size_t MacTLS_GetDbgPlainLen(const MacTLS_Context *ctx) { return ctx->hs13.plain_len; }
-size_t MacTLS_GetDbgPlainOffset(const MacTLS_Context *ctx) { return ctx->hs13.plain_offset; }
-int MacTLS_GetDbgPostRecords(const MacTLS_Context *ctx) { return ctx->dbg_post_records; }
-int MacTLS_GetDbgAppRecords(const MacTLS_Context *ctx) { return ctx->dbg_app_records; }
-int MacTLS_GetDbgHsRecords(const MacTLS_Context *ctx) { return ctx->dbg_hs_records; }
-int MacTLS_GetDbgAlertRecords(const MacTLS_Context *ctx) { return ctx->dbg_alert_records; }
-size_t MacTLS_GetDbgMaxAppLen(const MacTLS_Context *ctx) { return ctx->dbg_max_app_len; }
-int MacTLS_GetDbgLastInnerCt(const MacTLS_Context *ctx) { return ctx->dbg_last_inner_ct; }
-int MacTLS_GetDbgWriteCalls(const MacTLS_Context *ctx) { return ctx->dbg_write_calls; }
-size_t MacTLS_GetDbgWriteBytes(const MacTLS_Context *ctx) { return ctx->dbg_write_bytes; }
-size_t MacTLS_GetDbgRecvLenAtConnected(const MacTLS_Context *ctx) { return ctx->dbg_recv_len_at_connected; }
-int MacTLS_GetDbgRecvRecordsCalls(const MacTLS_Context *ctx) { return ctx->dbg_recv_records_calls; }
-int MacTLS_GetDbgDecryptFailures(const MacTLS_Context *ctx) { return ctx->dbg_decrypt_failures; }
-int MacTLS_GetDbgBuildChCalls(const MacTLS_Context *ctx) { return ctx->hs13.dbg_build_ch_calls; }
-int MacTLS_GetDbgBuildFinishedCalls(const MacTLS_Context *ctx) { return ctx->hs13.dbg_build_finished_calls; }
-int MacTLS_GetDbgHandshakeStepCalls(const MacTLS_Context *ctx) { return ctx->hs13.dbg_handshake_step_calls; }
-int MacTLS_GetDbgSendBlockEnters(const MacTLS_Context *ctx) { return ctx->dbg_send_block_enters; }
-size_t MacTLS_GetDbgSendBlockMaxMsgLen(const MacTLS_Context *ctx) { return ctx->dbg_send_block_max_msg_len; }
 
 /* ── Configuration ── */
 

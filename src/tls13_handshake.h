@@ -142,12 +142,6 @@ typedef struct {
     bool                is_tls13;
     bool                hrr_received;
 
-    /* Debug counters */
-    uint16_t            dbg_records_decrypted;
-    uint8_t             dbg_last_hs_type;
-    uint16_t            dbg_build_ch_calls;     /* tls13_state_send_client_hello calls */
-    uint16_t            dbg_build_finished_calls; /* tls13_state_send_finished calls */
-    uint16_t            dbg_handshake_step_calls;
     bool                cert_request_received;
 
     /* X.509 validation context (pointer to MacTLS_Context's xc) */

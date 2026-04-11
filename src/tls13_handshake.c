@@ -1136,7 +1136,6 @@ static tls13_hs_result tls13_read_encrypted_hs(
             }
 
             *out_hs_type = hs->plain_buf[hs->plain_offset];
-            hs->dbg_last_hs_type = *out_hs_type;
             hs_body_len = get_u24(hs->plain_buf + hs->plain_offset + 1);
             total_hs = 4 + (size_t)hs_body_len;
 
@@ -1209,7 +1208,6 @@ static tls13_hs_result tls13_read_encrypted_hs(
             }
             hs->plain_len = pt_len;
             hs->plain_offset = 0;
-            hs->dbg_records_decrypted++;
         }
 
         /* Consume the record from the front of the recv buffer */
@@ -1950,8 +1948,6 @@ static tls13_hs_result tls13_state_recv_finished(
 static tls13_hs_result tls13_state_send_finished(tls13_hs_ctx *hs)
 {
     unsigned char finished_key[64];
-
-    hs->dbg_build_finished_calls++;
     unsigned char transcript_hash[64];
     unsigned char verify_data[64];
     br_hmac_key_context hmac_kc;
@@ -2156,8 +2152,6 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
     unsigned char seed[32];
     int ret;
 
-    hs->dbg_build_ch_calls++;
-
     if (eng == NULL) {
         hs->error = BR_ERR_BAD_STATE;
         return kTLS13_Error;
@@ -2257,7 +2251,6 @@ tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
                                      size_t *recv_len,
                                      const char *hostname)
 {
-    hs->dbg_handshake_step_calls++;
     switch (hs->state) {
     case kTLS13_SendClientHello: {
         tls13_hs_result r = tls13_state_send_client_hello(hs, hostname);
