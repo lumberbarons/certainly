@@ -66,9 +66,14 @@ static MenuHandle  gMethodMenu      = NULL;
 static short       gMethodIndex     = 1;  /* 1 = GET */
 static const char *kMethodNames[5] = { NULL, "GET", "POST", "PUT", "DELETE" };
 
+static TEHandle          gResponseTE      = NULL;
+static ControlHandle     gResponseScroll  = NULL;
+static ControlActionUPP  gScrollActionUPP = NULL;
+
 /* ── Forward declarations ── */
 static void ComputeLayout(void);
 static void DrawChrome(void);
+static pascal void ScrollActionProc(ControlHandle c, short part);
 
 static void focus_set(TEHandle te)
 {
@@ -194,6 +199,28 @@ void ui_init(void)
     if (gHeadersTE) TEAutoView(true, gHeadersTE);
     if (gBodyTE)    TEAutoView(true, gBodyTE);
 
+    /* Response pane: TE inside the response viewRect, scrollbar
+     * in the rightmost 15-pixel column of gResponseRect. */
+    {
+        Rect view = gResponseViewRect;
+        InsetRect(&view, 3, 2);
+        Rect dest = view;
+        gResponseTE = TENew(&dest, &view);
+    }
+
+    {
+        Rect sb;
+        sb.top    = gResponseRect.top;
+        sb.bottom = gResponseRect.bottom;
+        sb.right  = gResponseRect.right + 1;
+        sb.left   = sb.right - (15 + 1);
+        gResponseScroll = NewControl(gWindow, &sb, "\p",
+                                     true, 0, 0, 0,
+                                     scrollBarProc, 0);
+    }
+
+    gScrollActionUPP = NewControlActionUPP(ScrollActionProc);
+
     focus_set(gURLTE);
 }
 
@@ -204,6 +231,16 @@ void ui_dispose(void)
     if (gURLTE)     { TEDispose(gURLTE);     gURLTE     = NULL; }
 
     if (gSendBtn) { DisposeControl(gSendBtn); gSendBtn = NULL; }
+
+    if (gResponseScroll) {
+        DisposeControl(gResponseScroll);
+        gResponseScroll = NULL;
+    }
+    if (gResponseTE) { TEDispose(gResponseTE); gResponseTE = NULL; }
+    if (gScrollActionUPP) {
+        DisposeControlActionUPP(gScrollActionUPP);
+        gScrollActionUPP = NULL;
+    }
 
     if (gEditMenu)  { DeleteMenu(131); DisposeMenu(gEditMenu);  gEditMenu  = NULL; }
     if (gFileMenu)  { DeleteMenu(130); DisposeMenu(gFileMenu);  gFileMenu  = NULL; }
@@ -287,6 +324,31 @@ void ui_handle_event(const EventRecord *event)
                 if (TrackControl(ctl, local, NULL) == kControlButtonPart &&
                     gSendHandler) {
                     gSendHandler();
+                }
+                break;
+            }
+        }
+
+        /* Response pane scrollbar */
+        if (gResponseScroll) {
+            ControlHandle ctl = NULL;
+            short cpart = FindControl(local, gWindow, &ctl);
+            if (cpart && ctl == gResponseScroll) {
+                if (cpart == kControlIndicatorPart) {
+                    /* Direct thumb drag — action proc is not called
+                     * during indicator tracking, so reconcile
+                     * afterward by reading the control value and
+                     * calling TEScroll to match. */
+                    short before = GetControlValue(ctl);
+                    TrackControl(ctl, local, NULL);
+                    short after = GetControlValue(ctl);
+                    if (after != before && gResponseTE) {
+                        TEScroll(0, (short)(before - after), gResponseTE);
+                    }
+                } else {
+                    /* Arrow or page part — action proc handles each
+                     * tick. */
+                    TrackControl(ctl, local, gScrollActionUPP);
                 }
                 break;
             }
@@ -453,8 +515,89 @@ static void DrawChrome(void)
 
     DrawLabel(&gResponseLabelRect, "Response:");
     FrameRect(&gResponseRect);
+    if (gResponseTE) TEUpdate(&(*gResponseTE)->viewRect, gResponseTE);
 
     DrawControls(gWindow);
+}
+
+/* ── Response pane helpers and scroll action proc ── */
+
+static short ResponseLineHeight(void)
+{
+    if (!gResponseTE) return 12;
+    short lh = (*gResponseTE)->lineHeight;
+    return lh > 0 ? lh : 12;
+}
+
+static short ResponsePageHeight(void)
+{
+    if (!gResponseTE) return 12;
+    Rect v = (*gResponseTE)->viewRect;
+    short lh = ResponseLineHeight();
+    short visible_lines = (v.bottom - v.top) / lh;
+    /* Page scroll moves visible_lines - 1 to keep one line of context. */
+    return (visible_lines > 1) ? (short)((visible_lines - 1) * lh) : lh;
+}
+
+static short ClampScroll(short v)
+{
+    if (!gResponseScroll) return 0;
+    short max = GetControlMaximum(gResponseScroll);
+    if (v < 0)  v = 0;
+    if (v > max) v = max;
+    return v;
+}
+
+static short ComputeMaxScroll(void)
+{
+    if (!gResponseTE) return 0;
+    short lh = ResponseLineHeight();
+    short nLines = (*gResponseTE)->nLines;
+    Rect  view   = (*gResponseTE)->viewRect;
+    short visible_lines = (view.bottom - view.top) / lh;
+    short excess_lines = nLines - visible_lines;
+    if (excess_lines < 0) return 0;
+    return (short)(excess_lines * lh);
+}
+
+static pascal void ScrollActionProc(ControlHandle c, short part)
+{
+    if (c != gResponseScroll) return;
+    short delta = 0;
+    switch (part) {
+    case kControlUpButtonPart:   delta = -ResponseLineHeight(); break;
+    case kControlDownButtonPart: delta =  ResponseLineHeight(); break;
+    case kControlPageUpPart:     delta = -ResponsePageHeight(); break;
+    case kControlPageDownPart:   delta =  ResponsePageHeight(); break;
+    default: return;
+    }
+    short before = GetControlValue(c);
+    short after  = ClampScroll(before + delta);
+    if (after == before) return;
+    SetControlValue(c, after);
+    /* TEScroll sign convention: positive dv moves text DOWN (shows
+     * content above); negative dv moves text UP (shows content below).
+     * We stored scroll value as "pixels scrolled down," so to advance
+     * (down arrow, down page) we need a NEGATIVE dv. */
+    TEScroll(0, (short)(before - after), gResponseTE);
+}
+
+void ui_set_response(const char *text, size_t len)
+{
+    if (!gResponseTE) return;
+    long l = (long)len;
+    if (l > 32767L) l = 32767L;  /* TERec hard cap */
+    TESetText((const char *)text, l, gResponseTE);
+    if (gResponseScroll) {
+        SetControlMaximum(gResponseScroll, ComputeMaxScroll());
+        SetControlValue(gResponseScroll, 0);
+    }
+    InvalRect(&gResponseRect);
+}
+
+void ui_clear_response(void)
+{
+    ui_set_response("", 0);
 }
 
 /* ── Public setters ── */

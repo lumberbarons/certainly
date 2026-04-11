@@ -36,6 +36,14 @@ const char *ui_current_method(void);
  * Returns 1 if the app should quit as a result, 0 otherwise. */
 int ui_handle_menu(long menuChoice);
 
+/* Replace the response pane text. Input is raw bytes; len is a
+ * byte count (TERec caps at 32767 internally). Pointer is copied,
+ * not retained. */
+void ui_set_response(const char *text, size_t len);
+
+/* Clear the response pane (same as ui_set_response("", 0)). */
+void ui_clear_response(void);
+
 #ifdef __cplusplus
 }
 #endif
