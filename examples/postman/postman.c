@@ -57,6 +57,152 @@ static void finalize_send(void)
     ui_set_send_enabled(1);
 }
 
+static void finalize_response(int truncated);
+
+static void DriveSendStep(void)
+{
+    MacTLS_State state;
+    char         status[256];
+
+    if (!gSending || !gCtx) return;
+
+    /* Cancellation check — Task 16 wires Cmd-. to set gCancelled. */
+    if (gCancelled) {
+        ui_set_status("Cancelled");
+        finalize_send();
+        return;
+    }
+
+    state = MacTLS_Pump(gCtx);
+
+    switch (state) {
+    case kMacTLS_Connecting:
+        /* Transient — no status update. */
+        break;
+
+    case kMacTLS_Handshaking:
+        ui_set_status("TLS handshake...");
+        break;
+
+    case kMacTLS_Connected: {
+        if (!gRequestSent) {
+            MacTLS_Write(gCtx, gRequestBuf, (size_t)gRequestLen);
+            gRequestSent = 1;
+            ui_set_status("Sending request...");
+        }
+        int space = (int)sizeof(gResponseBuf) - gResponseLen - 1;
+        if (space <= 0) {
+            /* Response buffer saturated — stop waiting for Close we
+             * can't drain toward. Finalize with what we have. */
+            finalize_response(1);
+            return;
+        }
+        int n = MacTLS_Read(gCtx, gResponseBuf + gResponseLen,
+                            (size_t)space);
+        if (n > 0) {
+            gResponseLen += n;
+            /* Cheap periodic status update: only redraw when crossing
+             * a 1 KB boundary, not on every byte. */
+            if ((gResponseLen & ~1023) != (gPrevResponseLen & ~1023)) {
+                snprintf(status, sizeof(status),
+                         "Reading response (%d bytes)", gResponseLen);
+                ui_set_status(status);
+                gPrevResponseLen = gResponseLen;
+            }
+        }
+        break;
+    }
+
+    case kMacTLS_Closed: {
+        /* Server closed — drain any residual bytes the library has
+         * already decrypted into its internal buffer. */
+        for (;;) {
+            int space = (int)sizeof(gResponseBuf) - gResponseLen - 1;
+            if (space <= 0) break;
+            int n = MacTLS_Read(gCtx, gResponseBuf + gResponseLen,
+                                (size_t)space);
+            if (n <= 0) break;
+            gResponseLen += n;
+        }
+        finalize_response(gResponseLen >= (int)sizeof(gResponseBuf) - 1);
+        return;
+    }
+
+    case kMacTLS_Error:
+        format_tls_error(status, sizeof(status));
+        ui_set_status(status);
+        finalize_send();
+        return;
+
+    default:
+        break;
+    }
+}
+
+static void finalize_response(int truncated)
+{
+    const char *status_line; size_t status_len;
+    const char *headers;     size_t headers_len;
+    const char *body;        size_t body_len;
+    char        status[256];
+
+    if (gResponseLen == 0) {
+        ui_set_status("Empty response");
+        finalize_send();
+        return;
+    }
+
+    gResponseBuf[gResponseLen] = '\0';
+
+    if (http_split_response(gResponseBuf, (size_t)gResponseLen,
+                            &status_line, &status_len,
+                            &headers,     &headers_len,
+                            &body,        &body_len) != 0) {
+        ui_set_status("Malformed HTTP response");
+        /* Show raw first bytes so the user can see what came back. */
+        int show = gResponseLen > 256 ? 256 : gResponseLen;
+        ui_set_response(gResponseBuf, (size_t)show);
+        finalize_send();
+        return;
+    }
+
+    /* Build the status-line string, optionally suffixed with a
+     * truncation note. */
+    {
+        size_t out_len = status_len;
+        if (out_len > sizeof(status) - 32) out_len = sizeof(status) - 32;
+        memcpy(status, status_line, out_len);
+        status[out_len] = '\0';
+        if (truncated) {
+            strncat(status, "  (truncated to 32K)",
+                    sizeof(status) - out_len - 1);
+        }
+    }
+    ui_set_status(status);
+
+    /* Combine headers + blank line + body into a single display
+     * buffer and push it into the response pane. LF → CR conversion
+     * because TERec uses CR as its line separator on classic Mac OS. */
+    {
+        static char display[32768];
+        size_t dpos = 0;
+        for (size_t i = 0; i < headers_len && dpos < sizeof(display); i++) {
+            char c = headers[i];
+            if (c == '\n') c = '\r';
+            display[dpos++] = c;
+        }
+        if (dpos + 1 < sizeof(display)) display[dpos++] = '\r';
+        for (size_t i = 0; i < body_len && dpos < sizeof(display); i++) {
+            char c = body[i];
+            if (c == '\n') c = '\r';
+            display[dpos++] = c;
+        }
+        ui_set_response(display, dpos);
+    }
+
+    finalize_send();
+}
+
 static void DoSendAndReceive(void)
 {
     char url[1024];
@@ -162,8 +308,9 @@ int main(void)
     ui_set_send_handler(on_send_click);
 
     while (!gQuit) {
-        WaitNextEvent(everyEvent, &event, 10, NULL);
+        WaitNextEvent(everyEvent, &event, gSending ? 1 : 10, NULL);
         ui_handle_event(&event);
+        if (gSending) DriveSendStep();
     }
 
     ui_dispose();
