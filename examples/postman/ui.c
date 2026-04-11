@@ -150,6 +150,15 @@ void ui_init(void)
         TESetText(bdefs, (long)strlen(bdefs), gBodyTE);
     }
 
+    /* Enable auto-scroll: when the caret moves off-screen via typing or
+     * arrow keys, TESelView (called from the keyDown handler below and
+     * from TEClick's default click loop) will pan destRect so the caret
+     * stays visible. destRect is "bottomless" per Inside Macintosh Text
+     * p. 2-28, so no need to pre-size it taller than viewRect. */
+    if (gURLTE)     TEAutoView(true, gURLTE);
+    if (gHeadersTE) TEAutoView(true, gHeadersTE);
+    if (gBodyTE)    TEAutoView(true, gBodyTE);
+
     focus_set(gURLTE);
 }
 
@@ -219,7 +228,10 @@ void ui_handle_event(const EventRecord *event)
             focus_advance((event->modifiers & shiftKey) != 0);
             break;
         }
-        if (gFocusedTE) TEKey(c, gFocusedTE);
+        if (gFocusedTE) {
+            TEKey(c, gFocusedTE);
+            TESelView(gFocusedTE);  /* keep caret visible */
+        }
         break;
     }
 
