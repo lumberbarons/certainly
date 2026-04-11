@@ -48,6 +48,10 @@ static Rect        gResponseLabelRect;
 static Rect        gResponseRect;    /* includes scrollbar column */
 static Rect        gResponseViewRect;/* minus scrollbar column */
 
+static TEHandle    gURLTE           = NULL;
+static TEHandle    gHeadersTE       = NULL;
+static TEHandle    gBodyTE          = NULL;
+
 /* ── Forward declarations ── */
 static void ComputeLayout(void);
 static void DrawChrome(void);
@@ -69,10 +73,60 @@ void ui_init(void)
     TextSize(10);
 
     ComputeLayout();
+
+    /* URL field — single-line. destRect can extend horizontally
+     * beyond viewRect to allow horizontal scrolling via arrow keys. */
+    {
+        Rect view = gURLRect;
+        InsetRect(&view, 3, 2);
+        Rect dest = view;
+        dest.right += 4000;   /* allow long URLs */
+        gURLTE = TENew(&dest, &view);
+    }
+
+    /* Headers field — multiline. */
+    {
+        Rect view = gHeadersRect;
+        InsetRect(&view, 3, 2);
+        Rect dest = view;
+        gHeadersTE = TENew(&dest, &view);
+    }
+
+    /* Body field — multiline. */
+    {
+        Rect view = gBodyRect;
+        InsetRect(&view, 3, 2);
+        Rect dest = view;
+        gBodyTE = TENew(&dest, &view);
+    }
+
+    /* Install default text. TERec uses CR (\r) as its line separator,
+     * not LF (\n). The defaults below give the user a working JSON
+     * REST starting point that they can edit or delete. */
+    if (gURLTE) {
+        TESetText("https://", 8L, gURLTE);
+    }
+    if (gHeadersTE) {
+        const char *hdefs =
+            "Content-Type: application/json\r"
+            "Accept: application/json";
+        TESetText(hdefs, (long)strlen(hdefs), gHeadersTE);
+    }
+    if (gBodyTE) {
+        const char *bdefs =
+            "{\r"
+            "  \"key\": \"value\"\r"
+            "}";
+        TESetText(bdefs, (long)strlen(bdefs), gBodyTE);
+    }
 }
 
 void ui_dispose(void)
 {
+    if (gBodyTE)    { TEDispose(gBodyTE);    gBodyTE    = NULL; }
+    if (gHeadersTE) { TEDispose(gHeadersTE); gHeadersTE = NULL; }
+    if (gURLTE)     { TEDispose(gURLTE);     gURLTE     = NULL; }
+
     if (gWindow) {
         DisposeWindow(gWindow);
         gWindow = NULL;
@@ -193,6 +247,10 @@ static void DrawChrome(void)
 
     DrawLabel(&gBodyLabelRect,     "Body:");
     FrameRect(&gBodyRect);
+
+    if (gURLTE)     TEUpdate(&(*gURLTE)->viewRect,     gURLTE);
+    if (gHeadersTE) TEUpdate(&(*gHeadersTE)->viewRect, gHeadersTE);
+    if (gBodyTE)    TEUpdate(&(*gBodyTE)->viewRect,    gBodyTE);
 
     DrawLabel(&gStatusLabelRect,   "Status:");
     /* Status text itself drawn blank for now. */
