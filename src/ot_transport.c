@@ -270,10 +270,23 @@ OTTransportState ot_transport_pump(OTTransport *t)
             t->state = kOTTransport_Error;
             break;
         }
-        if (t->ordRelReceived) {
-            /* Peer sent FIN — acknowledge it */
-            OTSndOrderlyDisconnect(t->endpoint);
-            t->state = kOTTransport_Closed;
+        /*
+         * When the peer sends FIN (T_ORDREL), OT refuses further
+         * sends with kOTLookErr until we acknowledge the event by
+         * calling OTRcvOrderlyDisconnect(). This consumes the pending
+         * event but does NOT close our send direction — TCP half-close
+         * allows us to keep sending data even after the peer closed
+         * its side. This is critical for TLS 1.3 where the server may
+         * finish sending everything and close before we've sent our
+         * client Finished.
+         *
+         * After OTRcvOrderlyDisconnect(), we stay in Connected state
+         * so sends still work. The caller will drive the final close
+         * via ot_transport_close() when it's done sending.
+         */
+        if (t->ordRelReceived && !t->ordRelConsumed) {
+            OTRcvOrderlyDisconnect(t->endpoint);
+            t->ordRelConsumed = true;
         }
         break;
 
@@ -332,6 +345,13 @@ int ot_transport_recv(OTTransport *t, void *buf, size_t len)
 
     if (result == kOTNoDataErr) {
         t->dataAvailable = false;  /* consumed all pending data */
+        /*
+         * If the peer sent ordRel, there will be no more data ever.
+         * Return -1 so the caller knows to stop trying.
+         */
+        if (t->ordRelReceived) {
+            return -1;
+        }
         return 0;
     }
     if (result < 0) {

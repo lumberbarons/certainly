@@ -107,10 +107,31 @@ typedef struct {
     unsigned char       client_hs_secret[64];
     unsigned char       server_hs_secret[64];
 
-    /* Buffer for non-certificate handshake messages */
+    /* Buffer for non-certificate handshake messages (outgoing) */
     unsigned char       msg_buf[4096];
     size_t              msg_len;
     size_t              msg_offset;
+
+    /*
+     * Length of a pre-read handshake message sitting in msg_buf
+     * (for the RecvCertRequestOrCert handler to hand off to
+     * RecvCertificate). SEPARATE from msg_len to avoid triggering
+     * the outgoing-send pump path.
+     */
+    size_t              pending_recv_msg_len;
+
+    /*
+     * Plaintext buffer for decrypted incoming handshake records.
+     * TLS 1.3 servers commonly pack multiple handshake messages into
+     * a single encrypted record (EncryptedExtensions + Certificate +
+     * CertificateVerify + Finished). We decrypt the full record into
+     * this buffer, then consume handshake messages one at a time from
+     * here, advancing plain_offset. When plain_offset == plain_len,
+     * we decrypt the next record.
+     */
+    unsigned char       plain_buf[16384];
+    size_t              plain_len;
+    size_t              plain_offset;
 
     /* HRR cookie */
     unsigned char       cookie[256];
@@ -120,6 +141,13 @@ typedef struct {
     uint16_t            cipher_suite;
     bool                is_tls13;
     bool                hrr_received;
+
+    /* Debug counters */
+    uint16_t            dbg_records_decrypted;
+    uint8_t             dbg_last_hs_type;
+    uint16_t            dbg_build_ch_calls;     /* tls13_state_send_client_hello calls */
+    uint16_t            dbg_build_finished_calls; /* tls13_state_send_finished calls */
+    uint16_t            dbg_handshake_step_calls;
     bool                cert_request_received;
 
     /* X.509 validation context (pointer to MacTLS_Context's xc) */

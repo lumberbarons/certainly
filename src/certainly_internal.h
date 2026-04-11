@@ -85,6 +85,29 @@ struct MacTLS_Context {
     bool            tls13_active;
     /* True once TLS 1.3 handshake has started (ClientHello sent) */
     bool            tls13_started;
+
+    /* Debug counters: total bytes sent/received during handshake */
+    size_t          dbg_total_sent;
+    size_t          dbg_total_recv;
+    size_t          dbg_pump_count;
+    /* Snapshot of first 16 bytes of first send (ClientHello record) */
+    unsigned char   dbg_first_send[16];
+    bool            dbg_first_send_captured;
+
+    /* Diagnostics for post-handshake processing */
+    uint16_t        dbg_post_records;       /* records processed in tls13_recv_records */
+    uint16_t        dbg_app_records;        /* app_data records received */
+    uint16_t        dbg_hs_records;         /* handshake records (NewSessionTicket) */
+    uint16_t        dbg_alert_records;      /* alert records (close_notify) */
+    size_t          dbg_max_app_len;        /* max tls13_app_len observed */
+    uint8_t         dbg_last_inner_ct;      /* last inner content type decrypted */
+    uint16_t        dbg_write_calls;        /* MacTLS_Write invocations */
+    size_t          dbg_write_bytes;        /* bytes sent via MacTLS_Write */
+    size_t          dbg_recv_len_at_connected; /* tls13_recv_len at moment of transition */
+    uint16_t        dbg_recv_records_calls; /* how many times tls13_recv_records was called */
+    uint16_t        dbg_decrypt_failures;   /* record decrypt failures in recv_records */
+    uint16_t        dbg_send_block_enters;  /* times we entered the handshake send block */
+    size_t          dbg_send_block_max_msg_len; /* max msg_len observed in send block */
 };
 
 struct MacTLS_Config {

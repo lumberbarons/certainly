@@ -1049,9 +1049,26 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
         return kTLS13_WantRead;
     }
 
+    /*
+     * Handle Alert records (type 21).
+     * The server rejected our handshake. The alert is 2 bytes:
+     * [level][description]. Level 2 = fatal.
+     * Store the alert description in hs->error so we can diagnose.
+     */
+    if (record_type == TLS13_CT_ALERT) {
+        if (record_len >= 2) {
+            /* Encode as 0x1000 | alert_desc for diagnostics */
+            hs->error = 0x1000 | (int)recv_buf[6];
+        } else {
+            hs->error = 0x1000;
+        }
+        return kTLS13_Error;
+    }
+
     /* We expect a Handshake record (type 22) */
     if (record_type != TLS13_CT_HANDSHAKE) {
-        hs->error = BR_ERR_UNEXPECTED;
+        /* Encode type for diagnostics */
+        hs->error = 0x2000 | (int)record_type;
         return kTLS13_Error;
     }
 
@@ -1100,6 +1117,53 @@ static tls13_hs_result tls13_read_encrypted_hs(
     int ret;
 
     for (;;) {
+        /*
+         * If the plaintext buffer has leftover data from a previous
+         * decryption, extract the next handshake message from it.
+         * TLS 1.3 servers often pack multiple handshake messages
+         * (EncryptedExtensions, Certificate, CertificateVerify,
+         * Finished) into a single encrypted record.
+         */
+        if (hs->plain_offset < hs->plain_len) {
+            size_t remaining = hs->plain_len - hs->plain_offset;
+            uint32_t hs_body_len;
+            size_t total_hs;
+
+            /* Need at least 4 bytes for the handshake header */
+            if (remaining < 4) {
+                hs->error = BR_ERR_BAD_PARAM;
+                return kTLS13_Error;
+            }
+
+            *out_hs_type = hs->plain_buf[hs->plain_offset];
+            hs->dbg_last_hs_type = *out_hs_type;
+            hs_body_len = get_u24(hs->plain_buf + hs->plain_offset + 1);
+            total_hs = 4 + (size_t)hs_body_len;
+
+            if (total_hs > remaining) {
+                /*
+                 * Handshake message spans multiple records —
+                 * uncommon but legal. Not supported in v1.
+                 */
+                hs->error = BR_ERR_BAD_PARAM;
+                return kTLS13_Error;
+            }
+
+            /* Copy the handshake message to out_data */
+            memcpy(out_data, hs->plain_buf + hs->plain_offset, total_hs);
+            *out_len = total_hs;
+            hs->plain_offset += total_hs;
+
+            /* If we consumed all plaintext, reset for next record */
+            if (hs->plain_offset >= hs->plain_len) {
+                hs->plain_len = 0;
+                hs->plain_offset = 0;
+            }
+
+            return kTLS13_OK;
+        }
+
+        /* Plaintext buffer empty — read the next record from the network */
         if (*recv_len < 5) {
             return kTLS13_WantRead;
         }
@@ -1129,16 +1193,26 @@ static tls13_hs_result tls13_read_encrypted_hs(
             return kTLS13_Error;
         }
 
-        /* Decrypt the record */
-        ret = tls13_record_decrypt(&hs->read_ctx,
-                                   recv_buf + 5, record_len,
-                                   out_data, out_len, &inner_ct);
-        if (ret != 0) {
-            hs->error = BR_ERR_BAD_MAC;
-            return kTLS13_Error;
+        /*
+         * Decrypt the record into the plaintext buffer. The full
+         * decrypted payload may contain multiple handshake messages;
+         * we consume them one at a time via the loop above.
+         */
+        {
+            size_t pt_len = 0;
+            ret = tls13_record_decrypt(&hs->read_ctx,
+                                       recv_buf + 5, record_len,
+                                       hs->plain_buf, &pt_len, &inner_ct);
+            if (ret != 0) {
+                hs->error = BR_ERR_BAD_MAC;
+                return kTLS13_Error;
+            }
+            hs->plain_len = pt_len;
+            hs->plain_offset = 0;
+            hs->dbg_records_decrypted++;
         }
 
-        /* Consume the record from the front of the buffer */
+        /* Consume the record from the front of the recv buffer */
         memmove(recv_buf, recv_buf + total, *recv_len - total);
         *recv_len -= total;
 
@@ -1148,14 +1222,7 @@ static tls13_hs_result tls13_read_encrypted_hs(
             return kTLS13_Error;
         }
 
-        /* Extract the handshake message type from the decrypted data */
-        if (*out_len < 4) {
-            hs->error = BR_ERR_BAD_PARAM;
-            return kTLS13_Error;
-        }
-
-        *out_hs_type = out_data[0];
-        return kTLS13_OK;
+        /* Loop back to the top to extract the first handshake message */
     }
 }
 
@@ -1265,8 +1332,14 @@ static tls13_hs_result tls13_state_recv_cert_request_or_cert(
          * The message is already in msg_buf; we set state to
          * RecvCertificate and process it there. We store the data
          * so the certificate handler can use it.
+         *
+         * CRITICAL: We stash the length in a SEPARATE field, NOT in
+         * hs->msg_len. hs->msg_len is the OUTGOING send queue length,
+         * and setting it here would make the pump try to send the
+         * received Certificate back to the server as if it were our
+         * own data. That breaks the connection catastrophically.
          */
-        hs->msg_len = msg_len;
+        hs->pending_recv_msg_len = msg_len;
         hs->state = kTLS13_RecvCertificate;
         return kTLS13_OK;
     }
@@ -1334,12 +1407,12 @@ static tls13_hs_result tls13_state_recv_certificate(
     tls13_hs_result r;
 
     /*
-     * If msg_len was pre-loaded by the CertRequestOrCert handler,
-     * use that. Otherwise read a new encrypted message.
+     * If pending_recv_msg_len was pre-loaded by the CertRequestOrCert
+     * handler, use that. Otherwise read a new encrypted message.
      */
-    if (hs->msg_len > 0) {
-        msg_len = hs->msg_len;
-        hs->msg_len = 0;
+    if (hs->pending_recv_msg_len > 0) {
+        msg_len = hs->pending_recv_msg_len;
+        hs->pending_recv_msg_len = 0;
         hs_type = hs->msg_buf[0];
     } else {
         r = tls13_read_encrypted_hs(hs, recv_buf, recv_len, &hs_type,
@@ -1877,6 +1950,8 @@ static tls13_hs_result tls13_state_recv_finished(
 static tls13_hs_result tls13_state_send_finished(tls13_hs_ctx *hs)
 {
     unsigned char finished_key[64];
+
+    hs->dbg_build_finished_calls++;
     unsigned char transcript_hash[64];
     unsigned char verify_data[64];
     br_hmac_key_context hmac_kc;
@@ -2081,6 +2156,8 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
     unsigned char seed[32];
     int ret;
 
+    hs->dbg_build_ch_calls++;
+
     if (eng == NULL) {
         hs->error = BR_ERR_BAD_STATE;
         return kTLS13_Error;
@@ -2180,11 +2257,19 @@ tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
                                      size_t *recv_len,
                                      const char *hostname)
 {
+    hs->dbg_handshake_step_calls++;
     switch (hs->state) {
     case kTLS13_SendClientHello: {
         tls13_hs_result r = tls13_state_send_client_hello(hs, hostname);
         if (r == kTLS13_WantWrite) {
-            hs->state = kTLS13_SendCCS;
+            /*
+             * Skip SendCCS here — per RFC 8446 Appendix D.4, the CCS
+             * should be sent "immediately before the second flight",
+             * i.e. right before the client Finished message, not
+             * right after ClientHello. Sending it too early confuses
+             * some servers.
+             */
+            hs->state = kTLS13_RecvServerHello;
         }
         return r;
     }

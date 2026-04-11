@@ -15,12 +15,47 @@
 #include <TextEdit.h>
 #include <Dialogs.h>
 #include <Events.h>
+#include <Files.h>
 #include <OpenTransport.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 
 #include "certainly.h"
+
+/*
+ * Log to a file on the extfs-mapped "Unix" volume.
+ * The host has /tmp/ss_log mapped as a Mac OS 9 volume named "Unix".
+ * We append to "Unix:certainly.log" which shows up on the host at
+ * /tmp/ss_log/certainly.log — we can tail -f it from the Mac.
+ */
+static void log_line(const char *msg)
+{
+    FSSpec spec;
+    short ref;
+    OSErr err;
+    long len;
+    char newline = '\n';
+
+    /* Find the Unix volume by name */
+    err = FSMakeFSSpec(0, 0, "\pThe Outside World:certainly.log", &spec);
+    if (err == fnfErr) {
+        /* File doesn't exist — create it */
+        FSpCreate(&spec, 'ttxt', 'TEXT', smSystemScript);
+    } else if (err != noErr) {
+        return;  /* Can't even find the volume */
+    }
+
+    if (FSpOpenDF(&spec, fsWrPerm, &ref) != noErr) return;
+
+    /* Seek to end, append line + newline */
+    SetFPos(ref, fsFromLEOF, 0);
+    len = strlen(msg);
+    FSWrite(ref, &len, msg);
+    len = 1;
+    FSWrite(ref, &len, &newline);
+    FSClose(ref);  /* flush */
+}
 
 /* Display status text in the window */
 static void DrawStatusLine(WindowPtr win, int line, const char *text)
@@ -55,11 +90,11 @@ int main(void)
     bool            done = false;
     int             displayLine = 0;
 
-    const char *host = "httpbin.org";
+    const char *host = "raw.githubusercontent.com";
     const char *request =
-        "GET /get HTTP/1.1\r\n"
-        "Host: httpbin.org\r\n"
-        "Accept: application/json\r\n"
+        "GET /anthropics/claude-code/main/README.md HTTP/1.1\r\n"
+        "Host: raw.githubusercontent.com\r\n"
+        "User-Agent: Certainly/0.1\r\n"
         "Connection: close\r\n"
         "\r\n";
 
@@ -84,7 +119,7 @@ int main(void)
     SetPort(window);
 
     DrawStatusLine(window, displayLine++,
-                   "Connecting to httpbin.org:443...");
+                   "Connecting to tls13.akamai.io:443...");
 
     /* Start TLS connection */
     ctx = MacTLS_Create(host, 443);
@@ -136,8 +171,17 @@ int main(void)
 
         case kMacTLS_Connected:
             if (!requestSent) {
+                char logbuf[200];
                 DrawStatusLine(window, 1, "TLS connected! Sending request...");
+                log_line("=== State: Connected ===");
+                sprintf(logbuf, "sent=%lu recv=%lu rrlen@conn=%lu",
+                        (unsigned long)MacTLS_GetDbgTotalSent(ctx),
+                        (unsigned long)MacTLS_GetDbgTotalRecv(ctx),
+                        (unsigned long)MacTLS_GetDbgRecvLenAtConnected(ctx));
+                log_line(logbuf);
+                log_line("About to send HTTP request");
                 MacTLS_Write(ctx, request, strlen(request));
+                log_line("HTTP request sent");
                 requestSent = true;
                 displayLine = 3;
             }
@@ -147,9 +191,11 @@ int main(void)
                 int n = MacTLS_Read(ctx, response + totalRead,
                                     sizeof(response) - totalRead - 1);
                 if (n > 0) {
+                    char logbuf[80];
                     totalRead += n;
                     response[totalRead] = '\0';
-
+                    sprintf(logbuf, "Read %d bytes, total=%d", n, totalRead);
+                    log_line(logbuf);
                     /* Display response lines as they arrive */
                     DrawStatusLine(window, 2, "Receiving response...");
                 }
@@ -157,9 +203,112 @@ int main(void)
             break;
 
         case kMacTLS_Closed:
-            /* Server closed connection — we're done */
+            /* Server closed connection — drain any remaining response data */
+            log_line("=== State: Closed ===");
+            {
+                int n;
+                while ((n = MacTLS_Read(ctx, response + totalRead,
+                                        sizeof(response) - totalRead - 1)) > 0) {
+                    totalRead += n;
+                }
+            }
             response[totalRead] = '\0';
-            DrawStatusLine(window, 2, "Connection closed. Response:");
+            {
+                char dbgmsg[128];
+                sprintf(dbgmsg, "Closed total=%d sent=%lu recv=%lu",
+                        totalRead,
+                        (unsigned long)MacTLS_GetDbgTotalSent(ctx),
+                        (unsigned long)MacTLS_GetDbgTotalRecv(ctx));
+                DrawStatusLine(window, 2, dbgmsg);
+                log_line(dbgmsg);
+                sprintf(dbgmsg, "post=%d app=%d hs=%d alrt=%d maxApp=%lu",
+                        MacTLS_GetDbgPostRecords(ctx),
+                        MacTLS_GetDbgAppRecords(ctx),
+                        MacTLS_GetDbgHsRecords(ctx),
+                        MacTLS_GetDbgAlertRecords(ctx),
+                        (unsigned long)MacTLS_GetDbgMaxAppLen(ctx));
+                log_line(dbgmsg);
+                sprintf(dbgmsg, "write=%d/%lu rrcalls=%d decFail=%d lastCT=%d",
+                        MacTLS_GetDbgWriteCalls(ctx),
+                        (unsigned long)MacTLS_GetDbgWriteBytes(ctx),
+                        MacTLS_GetDbgRecvRecordsCalls(ctx),
+                        MacTLS_GetDbgDecryptFailures(ctx),
+                        MacTLS_GetDbgLastInnerCt(ctx));
+                log_line(dbgmsg);
+                sprintf(dbgmsg, "build_ch=%d build_finished=%d hs_step=%d",
+                        MacTLS_GetDbgBuildChCalls(ctx),
+                        MacTLS_GetDbgBuildFinishedCalls(ctx),
+                        MacTLS_GetDbgHandshakeStepCalls(ctx));
+                log_line(dbgmsg);
+                sprintf(dbgmsg, "send_block_enters=%d max_msg_len=%lu",
+                        MacTLS_GetDbgSendBlockEnters(ctx),
+                        (unsigned long)MacTLS_GetDbgSendBlockMaxMsgLen(ctx));
+                log_line(dbgmsg);
+                /* Log recv_buf contents */
+                {
+                    const unsigned char *rb = MacTLS_GetTLS13RecvBuf(ctx);
+                    size_t rl = MacTLS_GetTLS13RecvLen(ctx);
+                    size_t i, limit = rl > 32 ? 32 : rl;
+                    char hex[200];
+                    char *p = hex;
+                    sprintf(p, "recvbuf[%lu]: ", (unsigned long)rl);
+                    p += strlen(p);
+                    for (i = 0; i < limit; i++) {
+                        sprintf(p, "%02x ", rb[i]);
+                        p += 3;
+                    }
+                    *p = '\0';
+                    log_line(hex);
+                }
+                /* Log the response if we got one */
+                if (totalRead > 0) {
+                    log_line("--- Response body ---");
+                    log_line(response);
+                    log_line("--- End response ---");
+                } else {
+                    log_line("NO RESPONSE BODY RECEIVED");
+                }
+                sprintf(dbgmsg, "post=%d app=%d alrt=%d lastCT=%d",
+                        MacTLS_GetDbgPostRecords(ctx),
+                        MacTLS_GetDbgAppRecords(ctx),
+                        MacTLS_GetDbgAlertRecords(ctx),
+                        MacTLS_GetDbgLastInnerCt(ctx));
+                DrawStatusLine(window, 5, dbgmsg);
+                sprintf(dbgmsg, "post=%d app=%d alrt=%d lastCT=%d",
+                        MacTLS_GetDbgPostRecords(ctx),
+                        MacTLS_GetDbgAppRecords(ctx),
+                        MacTLS_GetDbgAlertRecords(ctx),
+                        MacTLS_GetDbgLastInnerCt(ctx));
+                DrawStatusLine(window, 5, dbgmsg);
+                sprintf(dbgmsg, "write=%d/%lu rrcalls=%d rrlen@conn=%lu decFail=%d",
+                        MacTLS_GetDbgWriteCalls(ctx),
+                        (unsigned long)MacTLS_GetDbgWriteBytes(ctx),
+                        MacTLS_GetDbgRecvRecordsCalls(ctx),
+                        (unsigned long)MacTLS_GetDbgRecvLenAtConnected(ctx),
+                        MacTLS_GetDbgDecryptFailures(ctx));
+                DrawStatusLine(window, 6, dbgmsg);
+                sprintf(dbgmsg, "recv=%lu plain=%lu/%lu hs13err=%d",
+                        (unsigned long)MacTLS_GetTLS13RecvLen(ctx),
+                        (unsigned long)MacTLS_GetDbgPlainOffset(ctx),
+                        (unsigned long)MacTLS_GetDbgPlainLen(ctx),
+                        MacTLS_GetTLS13Error(ctx));
+                DrawStatusLine(window, 3, dbgmsg);
+                /* Dump first bytes of recv_buf */
+                {
+                    const unsigned char *rb = MacTLS_GetTLS13RecvBuf(ctx);
+                    size_t rl = MacTLS_GetTLS13RecvLen(ctx);
+                    size_t i, limit = rl > 16 ? 16 : rl;
+                    char hex[128];
+                    char *p = hex;
+                    for (i = 0; i < limit; i++) {
+                        sprintf(p, "%02x ", rb[i]);
+                        p += 3;
+                    }
+                    *p = '\0';
+                    sprintf(dbgmsg, "recvbuf: %s", hex);
+                    DrawStatusLine(window, 4, dbgmsg);
+                }
+            }
 
             /* Display the response, line by line */
             {
@@ -183,11 +332,53 @@ int main(void)
         case kMacTLS_Error:
             {
                 char errMsg[128];
-                sprintf(errMsg, "ERROR: code=%d, OT=%ld, BearSSL=%d",
+                sprintf(errMsg, "ERROR: code=%d OT=%ld BSSL=%d",
                         MacTLS_GetError(ctx),
                         (long)MacTLS_GetOTError(ctx),
                         MacTLS_GetBearSSLError(ctx));
                 DrawStatusLine(window, displayLine++, errMsg);
+                sprintf(errMsg, "tls13: state=%d err=%d msg=%lu/%lu recv=%lu",
+                        MacTLS_GetTLS13State(ctx),
+                        MacTLS_GetTLS13Error(ctx),
+                        (unsigned long)MacTLS_GetTLS13MsgOffset(ctx),
+                        (unsigned long)MacTLS_GetTLS13MsgLen(ctx),
+                        (unsigned long)MacTLS_GetTLS13RecvLen(ctx));
+                DrawStatusLine(window, displayLine++, errMsg);
+                /* Dump first bytes of recv buffer in hex */
+                {
+                    const unsigned char *rb = MacTLS_GetTLS13RecvBuf(ctx);
+                    size_t rl = MacTLS_GetTLS13RecvLen(ctx);
+                    size_t i;
+                    char hex[128];
+                    char *p = hex;
+                    size_t limit = rl > 16 ? 16 : rl;
+                    for (i = 0; i < limit; i++) {
+                        sprintf(p, "%02x ", rb[i]);
+                        p += 3;
+                    }
+                    *p = '\0';
+                    sprintf(errMsg, "recv: %s", hex);
+                    DrawStatusLine(window, displayLine++, errMsg);
+                }
+                sprintf(errMsg, "dbg: pumps=%lu sent=%lu recv=%lu",
+                        (unsigned long)MacTLS_GetDbgPumpCount(ctx),
+                        (unsigned long)MacTLS_GetDbgTotalSent(ctx),
+                        (unsigned long)MacTLS_GetDbgTotalRecv(ctx));
+                DrawStatusLine(window, displayLine++, errMsg);
+                /* First 16 bytes of ClientHello (as sent) */
+                {
+                    const unsigned char *sb = MacTLS_GetDbgFirstSend(ctx);
+                    size_t i;
+                    char hex[128];
+                    char *p = hex;
+                    for (i = 0; i < 16; i++) {
+                        sprintf(p, "%02x ", sb[i]);
+                        p += 3;
+                    }
+                    *p = '\0';
+                    sprintf(errMsg, "sent: %s", hex);
+                    DrawStatusLine(window, displayLine++, errMsg);
+                }
             }
             done = true;
             break;

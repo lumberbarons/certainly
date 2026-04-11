@@ -99,6 +99,38 @@ MacTLS_Error MacTLS_GetError(const MacTLS_Context *ctx);
 OSStatus     MacTLS_GetOTError(const MacTLS_Context *ctx);
 int          MacTLS_GetBearSSLError(const MacTLS_Context *ctx);
 
+/* Debug getters for TLS 1.3 state (diagnostic only) */
+int          MacTLS_GetTLS13State(const MacTLS_Context *ctx);
+int          MacTLS_GetTLS13Error(const MacTLS_Context *ctx);
+size_t       MacTLS_GetTLS13MsgLen(const MacTLS_Context *ctx);
+size_t       MacTLS_GetTLS13MsgOffset(const MacTLS_Context *ctx);
+size_t       MacTLS_GetTLS13RecvLen(const MacTLS_Context *ctx);
+const unsigned char *MacTLS_GetTLS13RecvBuf(const MacTLS_Context *ctx);
+size_t       MacTLS_GetDbgTotalSent(const MacTLS_Context *ctx);
+size_t       MacTLS_GetDbgTotalRecv(const MacTLS_Context *ctx);
+size_t       MacTLS_GetDbgPumpCount(const MacTLS_Context *ctx);
+const unsigned char *MacTLS_GetDbgFirstSend(const MacTLS_Context *ctx);
+int MacTLS_GetDbgRecordsDecrypted(const MacTLS_Context *ctx);
+int MacTLS_GetDbgLastHsType(const MacTLS_Context *ctx);
+size_t MacTLS_GetDbgPlainLen(const MacTLS_Context *ctx);
+size_t MacTLS_GetDbgPlainOffset(const MacTLS_Context *ctx);
+int MacTLS_GetDbgPostRecords(const MacTLS_Context *ctx);
+int MacTLS_GetDbgAppRecords(const MacTLS_Context *ctx);
+int MacTLS_GetDbgHsRecords(const MacTLS_Context *ctx);
+int MacTLS_GetDbgAlertRecords(const MacTLS_Context *ctx);
+size_t MacTLS_GetDbgMaxAppLen(const MacTLS_Context *ctx);
+int MacTLS_GetDbgLastInnerCt(const MacTLS_Context *ctx);
+int MacTLS_GetDbgWriteCalls(const MacTLS_Context *ctx);
+size_t MacTLS_GetDbgWriteBytes(const MacTLS_Context *ctx);
+size_t MacTLS_GetDbgRecvLenAtConnected(const MacTLS_Context *ctx);
+int MacTLS_GetDbgRecvRecordsCalls(const MacTLS_Context *ctx);
+int MacTLS_GetDbgDecryptFailures(const MacTLS_Context *ctx);
+int MacTLS_GetDbgBuildChCalls(const MacTLS_Context *ctx);
+int MacTLS_GetDbgBuildFinishedCalls(const MacTLS_Context *ctx);
+int MacTLS_GetDbgHandshakeStepCalls(const MacTLS_Context *ctx);
+int MacTLS_GetDbgSendBlockEnters(const MacTLS_Context *ctx);
+size_t MacTLS_GetDbgSendBlockMaxMsgLen(const MacTLS_Context *ctx);
+
 /* ── Configuration ── */
 MacTLS_Config *MacTLS_ConfigCreate(void);
 void           MacTLS_ConfigFree(MacTLS_Config *cfg);

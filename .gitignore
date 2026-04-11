@@ -9,3 +9,4 @@ bearssl/build/
 *.dsk
 *.ad
 tools/cacerts/
+tests/host/test_keysched

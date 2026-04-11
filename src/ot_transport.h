@@ -58,6 +58,9 @@ typedef struct {
     volatile bool   ordRelReceived;
     volatile bool   disconnectReceived;
     volatile bool   dnsComplete;
+
+    /* True once we've called OTRcvOrderlyDisconnect to clear the event */
+    bool            ordRelConsumed;
 } OTTransport;
 
 /* 30 seconds at 60 ticks/sec */
