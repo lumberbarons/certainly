@@ -8,6 +8,7 @@
 #include <Fonts.h>
 #include <Windows.h>
 #include <Controls.h>
+#include <ControlDefinitions.h>
 #include <TextEdit.h>
 #include <Menus.h>
 #include <ToolUtils.h>
@@ -54,6 +55,9 @@ static TEHandle    gHeadersTE       = NULL;
 static TEHandle    gBodyTE          = NULL;
 static TEHandle    gFocusedTE       = NULL;
 
+static ControlHandle gSendBtn        = NULL;
+static SendHandler   gSendHandler    = NULL;
+
 /* ── Forward declarations ── */
 static void ComputeLayout(void);
 static void DrawChrome(void);
@@ -95,6 +99,9 @@ void ui_init(void)
     TextSize(10);
 
     ComputeLayout();
+
+    gSendBtn = NewControl(gWindow, &gSendRect, "\pSend",
+                          true, 0, 0, 1, pushButProc, 0);
 
     /* URL field — single-line. destRect can extend horizontally
      * beyond viewRect to allow horizontal scrolling via arrow keys. */
@@ -168,6 +175,8 @@ void ui_dispose(void)
     if (gHeadersTE) { TEDispose(gHeadersTE); gHeadersTE = NULL; }
     if (gURLTE)     { TEDispose(gURLTE);     gURLTE     = NULL; }
 
+    if (gSendBtn) { DisposeControl(gSendBtn); gSendBtn = NULL; }
+
     if (gWindow) {
         DisposeWindow(gWindow);
         gWindow = NULL;
@@ -202,6 +211,20 @@ void ui_handle_event(const EventRecord *event)
         SetPort(gWindow);
         Point local = event->where;
         GlobalToLocal(&local);
+
+        /* Send button (real ControlHandle — check first so the
+         * button grabs the click before any TE field hit-test). */
+        if (gSendBtn) {
+            ControlHandle ctl = NULL;
+            short cpart = FindControl(local, gWindow, &ctl);
+            if (cpart && ctl == gSendBtn) {
+                if (TrackControl(ctl, local, NULL) == kControlButtonPart &&
+                    gSendHandler) {
+                    gSendHandler();
+                }
+                break;
+            }
+        }
 
         if (gURLTE && PtInRect(local, &(*gURLTE)->viewRect)) {
             focus_set(gURLTE);
@@ -332,17 +355,6 @@ static void DrawChrome(void)
     DrawLabel(&gURLLabelRect, "URL:");
     FrameRect(&gURLRect);
 
-    FrameRect(&gSendRect);
-    {
-        Rect inside = gSendRect;
-        short tw;
-        MoveTo(0, 0);
-        tw = StringWidth("\pSend");
-        MoveTo(inside.left + (inside.right - inside.left - tw) / 2,
-               inside.bottom - 6);
-        DrawString("\pSend");
-    }
-
     DrawLabel(&gHeadersLabelRect,  "Headers:");
     FrameRect(&gHeadersRect);
 
@@ -358,4 +370,19 @@ static void DrawChrome(void)
 
     DrawLabel(&gResponseLabelRect, "Response:");
     FrameRect(&gResponseRect);
+
+    DrawControls(gWindow);
+}
+
+/* ── Public setters ── */
+
+void ui_set_send_handler(SendHandler handler)
+{
+    gSendHandler = handler;
+}
+
+void ui_set_send_enabled(int enabled)
+{
+    if (!gSendBtn) return;
+    HiliteControl(gSendBtn, enabled ? 0 : 255);
 }

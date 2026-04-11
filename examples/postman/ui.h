@@ -19,6 +19,13 @@ void ui_dispose(void);
 /* Handle one event from WaitNextEvent. */
 void ui_handle_event(const EventRecord *event);
 
+/* Set by postman.c at startup. Called by ui.c when Send is clicked. */
+typedef void (*SendHandler)(void);
+void ui_set_send_handler(SendHandler handler);
+
+/* Enable or disable the Send button (grays and stops hit tracking). */
+void ui_set_send_enabled(int enabled);
+
 #ifdef __cplusplus
 }
 #endif

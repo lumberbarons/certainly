@@ -12,6 +12,7 @@
 #include <TextEdit.h>
 #include <Dialogs.h>
 #include <Events.h>
+#include <Sound.h>
 #include <OpenTransport.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +22,12 @@
 #include "http.h"
 
 int gQuit = 0;
+
+static void on_send_click(void)
+{
+    /* Replaced in Task 14 with DoSendAndReceive. */
+    SysBeep(10);
+}
 
 int main(void)
 {
@@ -38,6 +45,7 @@ int main(void)
     MacTLS_Init();
 
     ui_init();
+    ui_set_send_handler(on_send_click);
 
     while (!gQuit) {
         WaitNextEvent(everyEvent, &event, 10, NULL);
