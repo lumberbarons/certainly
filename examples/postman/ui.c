@@ -62,6 +62,10 @@ static MenuHandle gAppleMenu    = NULL;
 static MenuHandle gFileMenu     = NULL;
 static MenuHandle gEditMenu     = NULL;
 
+static MenuHandle  gMethodMenu      = NULL;
+static short       gMethodIndex     = 1;  /* 1 = GET */
+static const char *kMethodNames[5] = { NULL, "GET", "POST", "PUT", "DELETE" };
+
 /* ── Forward declarations ── */
 static void ComputeLayout(void);
 static void DrawChrome(void);
@@ -100,6 +104,15 @@ void ui_init(void)
     gEditMenu = GetMenu(131);
     if (gEditMenu) InsertMenu(gEditMenu, 0);
     DrawMenuBar();
+
+    /* Method popup — hierarchical (not in the menu bar), used as a
+     * popup triggered by clicks on gMethodRect. */
+    gMethodMenu = GetMenu(128);
+    if (gMethodMenu == NULL) {
+        /* Method menu resource missing — app cannot sensibly run. */
+        ExitToShell();
+    }
+    InsertMenu(gMethodMenu, -1);
 
     Rect bounds;
     SetRect(&bounds, kWinLeft, kWinTop,
@@ -196,6 +209,12 @@ void ui_dispose(void)
     if (gFileMenu)  { DeleteMenu(130); DisposeMenu(gFileMenu);  gFileMenu  = NULL; }
     if (gAppleMenu) { DeleteMenu(129); DisposeMenu(gAppleMenu); gAppleMenu = NULL; }
 
+    if (gMethodMenu) {
+        DeleteMenu(128);
+        DisposeMenu(gMethodMenu);
+        gMethodMenu = NULL;
+    }
+
     if (gWindow) {
         DisposeWindow(gWindow);
         gWindow = NULL;
@@ -239,6 +258,25 @@ void ui_handle_event(const EventRecord *event)
         SetPort(gWindow);
         Point local = event->where;
         GlobalToLocal(&local);
+
+        /* Method popup — click anywhere in gMethodRect opens a
+         * standard Mac OS 9 popup menu at the rect's bottom-left. */
+        if (PtInRect(local, &gMethodRect)) {
+            Point anchor;
+            anchor.v = gMethodRect.bottom;
+            anchor.h = gMethodRect.left;
+            LocalToGlobal(&anchor);
+
+            long chosen = PopUpMenuSelect(gMethodMenu,
+                                          anchor.v, anchor.h,
+                                          gMethodIndex);
+            short item = LoWord(chosen);
+            if (item >= 1 && item <= 4) {
+                gMethodIndex = item;
+                InvalRect(&gMethodRect);
+            }
+            break;
+        }
 
         /* Send button (real ControlHandle — check first so the
          * button grabs the click before any TE field hit-test). */
@@ -379,14 +417,23 @@ static void DrawLabel(const Rect *r, const char *text)
 
 static void DrawChrome(void)
 {
-    /* Static labels. Method popup body is drawn by a later task; for
-     * now just frame it and put "Method: GET" in its place as a placeholder. */
     FrameRect(&gMethodRect);
     {
-        Rect inside = gMethodRect;
-        InsetRect(&inside, 2, 0);
-        MoveTo(inside.left + 2, inside.bottom - 5);
-        DrawString("\pMethod: GET");
+        Str255 label;
+        const char *name = kMethodNames[gMethodIndex];
+        size_t nlen = strlen(name);
+        if (nlen > 247) nlen = 247;   /* leave room for "Method: " */
+        /* Build "Method: NAME" as a Pascal string. */
+        label[0] = (unsigned char)(8 + nlen);
+        memcpy(&label[1], "Method: ", 8);
+        memcpy(&label[1 + 8], name, nlen);
+
+        MoveTo(gMethodRect.left + 4, gMethodRect.bottom - 5);
+        DrawString(label);
+
+        /* Draw a small 'v' on the right as a cheap disclosure hint. */
+        MoveTo(gMethodRect.right - 10, gMethodRect.bottom - 7);
+        DrawChar('v');
     }
     DrawLabel(&gURLLabelRect, "URL:");
     FrameRect(&gURLRect);
@@ -421,6 +468,11 @@ void ui_set_send_enabled(int enabled)
 {
     if (!gSendBtn) return;
     HiliteControl(gSendBtn, enabled ? 0 : 255);
+}
+
+const char *ui_current_method(void)
+{
+    return kMethodNames[gMethodIndex];
 }
 
 int ui_handle_menu(long menuChoice)
