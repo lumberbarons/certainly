@@ -20,9 +20,12 @@
 #include "ui.h"
 #include "http.h"
 
+static int gQuit = 0;
+
 int main(void)
 {
-    /* Standard Toolbox init */
+    EventRecord event;
+
     InitGraf(&qd.thePort);
     InitFonts();
     InitWindows();
@@ -34,8 +37,19 @@ int main(void)
     InitOpenTransport();
     MacTLS_Init();
 
-    /* Tasks 6+ will create the real window here. For now, exit. */
+    ui_init();
 
+    while (!gQuit) {
+        WaitNextEvent(everyEvent, &event, 10, NULL);
+        ui_handle_event(&event);
+
+        /* Temporary quit-on-click until real dispatch is wired. */
+        if (event.what == mouseDown) {
+            gQuit = 1;
+        }
+    }
+
+    ui_dispose();
     MacTLS_Shutdown();
     CloseOpenTransport();
     return 0;
