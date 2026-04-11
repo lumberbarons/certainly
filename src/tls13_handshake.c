@@ -1057,10 +1057,11 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
      */
     if (record_type == TLS13_CT_ALERT) {
         if (record_len >= 2) {
-            /* Encode as 0x1000 | alert_desc for diagnostics */
-            hs->error = 0x1000 | (int)recv_buf[6];
+            /* Encode as 0x1LLDD where LL=level, DD=description. */
+            hs->error = 0x10000 | ((int)recv_buf[5] << 8) | (int)recv_buf[6];
         } else {
-            hs->error = 0x1000;
+            /* Short alert record — encode the (bogus) length. */
+            hs->error = 0x1F000 | (int)record_len;
         }
         return kTLS13_Error;
     }

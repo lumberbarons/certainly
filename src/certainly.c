@@ -1031,6 +1031,12 @@ OSStatus MacTLS_GetOTError(const MacTLS_Context *ctx)
 
 int MacTLS_GetBearSSLError(const MacTLS_Context *ctx)
 {
+    /*
+     * TLS 1.3 handshake errors are recorded in hs13.error using the
+     * same BR_ERR_* codes BearSSL uses. Surface those first so callers
+     * get meaningful diagnostics regardless of which path failed.
+     */
+    if (ctx->hs13.error != 0) return ctx->hs13.error;
     return br_ssl_engine_last_error(&((MacTLS_Context *)ctx)->sc.eng);
 }
 
