@@ -20,7 +20,7 @@
 #include "ui.h"
 #include "http.h"
 
-static int gQuit = 0;
+int gQuit = 0;
 
 int main(void)
 {
@@ -42,11 +42,6 @@ int main(void)
     while (!gQuit) {
         WaitNextEvent(everyEvent, &event, 10, NULL);
         ui_handle_event(&event);
-
-        /* Temporary quit-on-click until real dispatch is wired. */
-        if (event.what == mouseDown) {
-            gQuit = 1;
-        }
     }
 
     ui_dispose();

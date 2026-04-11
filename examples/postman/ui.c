@@ -52,10 +52,31 @@ static Rect        gResponseViewRect;/* minus scrollbar column */
 static TEHandle    gURLTE           = NULL;
 static TEHandle    gHeadersTE       = NULL;
 static TEHandle    gBodyTE          = NULL;
+static TEHandle    gFocusedTE       = NULL;
 
 /* ── Forward declarations ── */
 static void ComputeLayout(void);
 static void DrawChrome(void);
+
+static void focus_set(TEHandle te)
+{
+    if (gFocusedTE == te) return;
+    if (gFocusedTE) TEDeactivate(gFocusedTE);
+    gFocusedTE = te;
+    if (gFocusedTE) TEActivate(gFocusedTE);
+}
+
+static void focus_advance(int backward)
+{
+    TEHandle ring[3] = { gURLTE, gHeadersTE, gBodyTE };
+    int cur = -1;
+    for (int i = 0; i < 3; i++) {
+        if (ring[i] == gFocusedTE) { cur = i; break; }
+    }
+    if (cur < 0) cur = 0;
+    int next = backward ? (cur + 2) % 3 : (cur + 1) % 3;
+    focus_set(ring[next]);
+}
 
 /* ── Public API ── */
 
@@ -128,6 +149,8 @@ void ui_init(void)
             "}";
         TESetText(bdefs, (long)strlen(bdefs), gBodyTE);
     }
+
+    focus_set(gURLTE);
 }
 
 void ui_dispose(void)
@@ -154,9 +177,66 @@ void ui_handle_event(const EventRecord *event)
             EndUpdate(gWindow);
         }
         break;
+
+    case mouseDown: {
+        WindowPtr which;
+        short part = FindWindow(event->where, &which);
+        if (which != gWindow) break;
+
+        if (part == inDrag) {
+            Rect screen = (*GetGrayRgn())->rgnBBox;
+            DragWindow(gWindow, event->where, &screen);
+            break;
+        }
+        if (part != inContent) break;
+
+        SetPort(gWindow);
+        Point local = event->where;
+        GlobalToLocal(&local);
+
+        if (gURLTE && PtInRect(local, &(*gURLTE)->viewRect)) {
+            focus_set(gURLTE);
+            TEClick(local, (event->modifiers & shiftKey) != 0, gURLTE);
+        } else if (gHeadersTE && PtInRect(local, &(*gHeadersTE)->viewRect)) {
+            focus_set(gHeadersTE);
+            TEClick(local, (event->modifiers & shiftKey) != 0, gHeadersTE);
+        } else if (gBodyTE && PtInRect(local, &(*gBodyTE)->viewRect)) {
+            focus_set(gBodyTE);
+            TEClick(local, (event->modifiers & shiftKey) != 0, gBodyTE);
+        }
+        break;
+    }
+
+    case keyDown:
+    case autoKey: {
+        char c = (char)(event->message & charCodeMask);
+        if ((event->modifiers & cmdKey) && (c == 'q' || c == 'Q')) {
+            extern int gQuit;
+            gQuit = 1;
+            break;
+        }
+        if (c == 0x09) { /* Tab */
+            focus_advance((event->modifiers & shiftKey) != 0);
+            break;
+        }
+        if (gFocusedTE) TEKey(c, gFocusedTE);
+        break;
+    }
+
+    case activateEvt: {
+        int active = (event->modifiers & activeFlag) != 0;
+        if (gFocusedTE) {
+            if (active) TEActivate(gFocusedTE);
+            else        TEDeactivate(gFocusedTE);
+        }
+        break;
+    }
+
     default:
         break;
     }
+
+    if (gFocusedTE) TEIdle(gFocusedTE);
 }
 
 /* ── Layout ── */
