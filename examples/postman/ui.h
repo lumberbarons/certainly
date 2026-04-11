@@ -26,6 +26,11 @@ void ui_set_send_handler(SendHandler handler);
 /* Enable or disable the Send button (grays and stops hit tracking). */
 void ui_set_send_enabled(int enabled);
 
+/* Handle a menu-item hit (returned from MenuSelect or MenuKey).
+ * menuChoice is the raw 32-bit result: HiWord = menu ID, LoWord = item.
+ * Returns 1 if the app should quit as a result, 0 otherwise. */
+int ui_handle_menu(long menuChoice);
+
 #ifdef __cplusplus
 }
 #endif

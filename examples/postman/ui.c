@@ -58,6 +58,10 @@ static TEHandle    gFocusedTE       = NULL;
 static ControlHandle gSendBtn        = NULL;
 static SendHandler   gSendHandler    = NULL;
 
+static MenuHandle gAppleMenu    = NULL;
+static MenuHandle gFileMenu     = NULL;
+static MenuHandle gEditMenu     = NULL;
+
 /* ── Forward declarations ── */
 static void ComputeLayout(void);
 static void DrawChrome(void);
@@ -86,6 +90,17 @@ static void focus_advance(int backward)
 
 void ui_init(void)
 {
+    gAppleMenu = GetMenu(129);
+    if (gAppleMenu) {
+        AppendResMenu(gAppleMenu, 'DRVR');  /* DA list on the Apple menu */
+        InsertMenu(gAppleMenu, 0);
+    }
+    gFileMenu = GetMenu(130);
+    if (gFileMenu) InsertMenu(gFileMenu, 0);
+    gEditMenu = GetMenu(131);
+    if (gEditMenu) InsertMenu(gEditMenu, 0);
+    DrawMenuBar();
+
     Rect bounds;
     SetRect(&bounds, kWinLeft, kWinTop,
             kWinLeft + kWinWidth, kWinTop + kWinHeight);
@@ -177,6 +192,10 @@ void ui_dispose(void)
 
     if (gSendBtn) { DisposeControl(gSendBtn); gSendBtn = NULL; }
 
+    if (gEditMenu)  { DeleteMenu(131); DisposeMenu(gEditMenu);  gEditMenu  = NULL; }
+    if (gFileMenu)  { DeleteMenu(130); DisposeMenu(gFileMenu);  gFileMenu  = NULL; }
+    if (gAppleMenu) { DeleteMenu(129); DisposeMenu(gAppleMenu); gAppleMenu = NULL; }
+
     if (gWindow) {
         DisposeWindow(gWindow);
         gWindow = NULL;
@@ -199,6 +218,15 @@ void ui_handle_event(const EventRecord *event)
     case mouseDown: {
         WindowPtr which;
         short part = FindWindow(event->where, &which);
+        if (part == inMenuBar) {
+            long choice = MenuSelect(event->where);
+            if (ui_handle_menu(choice)) {
+                extern int gQuit;
+                gQuit = 1;
+            }
+            HiliteMenu(0);
+            break;
+        }
         if (which != gWindow) break;
 
         if (part == inDrag) {
@@ -242,10 +270,18 @@ void ui_handle_event(const EventRecord *event)
     case keyDown:
     case autoKey: {
         char c = (char)(event->message & charCodeMask);
-        if ((event->modifiers & cmdKey) && (c == 'q' || c == 'Q')) {
-            extern int gQuit;
-            gQuit = 1;
-            break;
+        if (event->modifiers & cmdKey) {
+            long choice = MenuKey(c);
+            if (HiWord(choice) != 0) {
+                if (ui_handle_menu(choice)) {
+                    extern int gQuit;
+                    gQuit = 1;
+                }
+                HiliteMenu(0);
+                break;
+            }
+            /* Unhandled cmd-key — fall through to TEKey so Cmd-arrow
+             * and friends work inside TE fields. */
         }
         if (c == 0x09) { /* Tab */
             focus_advance((event->modifiers & shiftKey) != 0);
@@ -385,4 +421,31 @@ void ui_set_send_enabled(int enabled)
 {
     if (!gSendBtn) return;
     HiliteControl(gSendBtn, enabled ? 0 : 255);
+}
+
+int ui_handle_menu(long menuChoice)
+{
+    short menuID = HiWord(menuChoice);
+    short item   = LoWord(menuChoice);
+
+    switch (menuID) {
+    case 130:   /* File */
+        if (item == 1) return 1;   /* Quit */
+        break;
+
+    case 129:   /* Apple */
+        /* Item 1 is "About Postman…"; items 3+ are DAs added via
+         * AppendResMenu. For now we don't do anything useful — just
+         * acknowledge the hit so the menu unhilites. */
+        break;
+
+    case 131:   /* Edit */
+        /* All items disabled; nothing to do. Future: route to TECut/
+         * TECopy/TEPaste for the focused TE. */
+        break;
+
+    default:
+        break;
+    }
+    return 0;
 }

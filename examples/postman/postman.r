@@ -36,3 +36,42 @@ resource 'MENU' (128, "Method") {
         "DELETE",  noIcon, noKey, noMark, plain;
     }
 };
+
+resource 'MENU' (129, "Apple") {
+    129,
+    textMenuProc,
+    0x7FFFFFFD,        /* disable "About" to match pre-selection style */
+    enabled,
+    apple,             /* apple logo character */
+    {
+        "About Postman\0xC9", noIcon, noKey, noMark, plain;
+        "-",              noIcon, noKey, noMark, plain;
+    }
+};
+
+resource 'MENU' (130, "File") {
+    130,
+    textMenuProc,
+    allEnabled,
+    enabled,
+    "File",
+    {
+        "Quit", noIcon, "Q", noMark, plain;
+    }
+};
+
+resource 'MENU' (131, "Edit") {
+    131,
+    textMenuProc,
+    0x00000000,        /* all items initially disabled */
+    enabled,
+    "Edit",
+    {
+        "Undo",       noIcon, "Z", noMark, plain;
+        "-",          noIcon, noKey, noMark, plain;
+        "Cut",        noIcon, "X", noMark, plain;
+        "Copy",       noIcon, "C", noMark, plain;
+        "Paste",      noIcon, "V", noMark, plain;
+        "Clear",      noIcon, noKey, noMark, plain;
+    }
+};
