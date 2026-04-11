@@ -23,7 +23,7 @@ BEARSSL_OBJS = \
 
 .PHONY: all clean test
 
-all: test_keysched
+all: test_keysched test_http
 
 test_keysched: test_keysched.c $(SRC)/tls13_keysched.c $(SRC)/tls13_keysched.h
 	$(CC) $(CFLAGS) -I$(BEARSSL_INC) -I$(BEARSSL_SRC) -I$(SRC) \
@@ -32,5 +32,13 @@ test_keysched: test_keysched.c $(SRC)/tls13_keysched.c $(SRC)/tls13_keysched.h
 test: test_keysched
 	./test_keysched
 
+test_http: test_http.c ../../examples/postman/http.c \
+           ../../examples/postman/http.h
+	$(CC) $(CFLAGS) -I../../examples/postman \
+		-o $@ test_http.c ../../examples/postman/http.c
+
+test_http_run: test_http
+	./test_http
+
 clean:
-	rm -f test_keysched
+	rm -f test_keysched test_http
