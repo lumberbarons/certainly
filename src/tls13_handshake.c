@@ -1051,19 +1051,29 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
 
     /*
      * Handle Alert records (type 21).
-     * The server rejected our handshake. The alert is 2 bytes:
-     * [level][description]. Level 2 = fatal.
-     * Store the alert description in hs->error so we can diagnose.
+     *
+     * If we see a plaintext alert at the ServerHello stage, the server
+     * rejected our ClientHello outright. Some servers (notably older
+     * AWS/nginx deployments like httpbin.org) refuse TLS 1.3 by closing
+     * with close_notify instead of gracefully downgrading via a
+     * legacy TLS 1.2 ServerHello. Treat any pre-handshake alert as a
+     * "retry with TLS 1.2" signal — BearSSL's T0 engine will send a
+     * pure TLS 1.2 ClientHello (no supported_versions extension) on
+     * the reconnect, which most servers accept.
+     *
+     * We still record the alert in hs->error (0x1LLDD encoding) so
+     * diagnostics are available if the TLS 1.2 retry also fails.
      */
     if (record_type == TLS13_CT_ALERT) {
         if (record_len >= 2) {
-            /* Encode as 0x1LLDD where LL=level, DD=description. */
             hs->error = 0x10000 | ((int)recv_buf[5] << 8) | (int)recv_buf[6];
         } else {
-            /* Short alert record — encode the (bogus) length. */
             hs->error = 0x1F000 | (int)record_len;
         }
-        return kTLS13_Error;
+        /* Consume the record so the pump's reconnect starts clean. */
+        memmove(recv_buf, recv_buf + total, *recv_len - total);
+        *recv_len -= total;
+        return kTLS13_Fallback12;
     }
 
     /* We expect a Handshake record (type 22) */

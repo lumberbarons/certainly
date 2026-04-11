@@ -341,6 +341,9 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
             ctx->tls13_active = false;
             ctx->tls13_started = false;
             ctx->hs13.is_tls13 = false;
+            /* Clear any diagnostic alert from the failed 1.3 attempt so
+             * a successful 1.2 retry doesn't surface stale error state. */
+            ctx->hs13.error = 0;
             ctx->state = kMacTLS_Connecting;
         }
         break;

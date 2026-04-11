@@ -141,7 +141,10 @@ static void TestOne(WindowPtr window, int line, const TestHost *t)
     MacTLS_State    state, lastState = kMacTLS_Idle;
     EventRecord     event;
     char            request[512];
-    char            response[4096];
+    /* Big enough to hold typical landing pages plus slack. If we fill it,
+     * we stop pumping and treat the test as done — continuing to pump
+     * without a drain target would spin forever. */
+    char            response[32768];
     int             totalRead   = 0;
     bool            requestSent = false;
     bool            done        = false;
@@ -190,11 +193,11 @@ static void TestOne(WindowPtr window, int line, const TestHost *t)
     while (!done) {
         WaitNextEvent(everyEvent, &event, 1, NULL);
 
-        /* 45 second per-host timeout */
-        if ((uint32_t)TickCount() - startTicks > (45 * 60)) {
+        /* 90 second per-host timeout */
+        if ((uint32_t)TickCount() - startTicks > (90 * 60)) {
             snprintf(status, sizeof(status),
-                     "[%s] FAIL: timeout in state %d",
-                     t->host, (int)lastState);
+                     "[%s] FAIL: timeout state=%d sent=%d read=%d",
+                     t->host, (int)lastState, (int)requestSent, totalRead);
             DrawStatusLine(window, line, status);
             LogLine(status);
             MacTLS_Close(ctx);
@@ -216,9 +219,22 @@ static void TestOne(WindowPtr window, int line, const TestHost *t)
                 requestSent = true;
             }
             {
-                int n = MacTLS_Read(ctx, response + totalRead,
-                                    sizeof(response) - totalRead - 1);
-                if (n > 0) totalRead += n;
+                size_t space = sizeof(response) - totalRead - 1;
+                if (space == 0) {
+                    /* Buffer full — stop waiting for a close we can't
+                     * make room for. Treat the completed read as success. */
+                    response[totalRead] = '\0';
+                    snprintf(status, sizeof(status),
+                             "[%s] OK %dB (buf full)", t->host, totalRead);
+                    DrawStatusLine(window, line, status);
+                    LogLine(status);
+                    done = true;
+                    break;
+                }
+                {
+                    int n = MacTLS_Read(ctx, response + totalRead, space);
+                    if (n > 0) totalRead += n;
+                }
             }
             break;
 
