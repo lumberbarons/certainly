@@ -63,6 +63,7 @@ void ui_init(void)
     gWindow = NewCWindow(NULL, &bounds, "\pPostman",
                          true, documentProc,
                          (WindowPtr)-1L, false, 0);
+    if (gWindow == NULL) return;
     SetPort(gWindow);
     TextFont(kFontIDGeneva);
     TextSize(10);
