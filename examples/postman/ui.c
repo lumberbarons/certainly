@@ -641,6 +641,37 @@ const char *ui_current_method(void)
     return kMethodNames[gMethodIndex];
 }
 
+/* ── Text accessor helpers ── */
+
+static int TEGetTextInto(TEHandle te, char *buf, size_t cap)
+{
+    if (!te) return -1;
+    CharsHandle h = TEGetText(te);
+    if (!h) return -1;
+    long n = (*te)->teLength;
+    if ((size_t)(n + 1) > cap) return -1;
+    HLock((Handle)h);
+    memcpy(buf, *h, (size_t)n);
+    HUnlock((Handle)h);
+    buf[n] = '\0';
+    return (int)n;
+}
+
+int ui_get_url(char *buf, size_t cap)
+{
+    return TEGetTextInto(gURLTE, buf, cap);
+}
+
+int ui_get_headers(char *buf, size_t cap)
+{
+    return TEGetTextInto(gHeadersTE, buf, cap);
+}
+
+int ui_get_body(char *buf, size_t cap)
+{
+    return TEGetTextInto(gBodyTE, buf, cap);
+}
+
 int ui_handle_menu(long menuChoice)
 {
     short menuID = HiWord(menuChoice);

@@ -48,6 +48,13 @@ void ui_clear_response(void);
  * at 255 bytes. Queues a redraw for the next update event. */
 void ui_set_status(const char *text);
 
+/* Copy the URL field text into `buf` (NUL-terminated). Returns the
+ * byte length (not counting the terminator), or -1 if the field
+ * doesn't fit in cap. */
+int ui_get_url(char *buf, size_t cap);
+int ui_get_headers(char *buf, size_t cap);
+int ui_get_body(char *buf, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif
