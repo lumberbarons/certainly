@@ -1,4 +1,5 @@
 #include "http.h"
+#include <stdio.h>
 #include <string.h>
 
 /* Copy src_len bytes from src into dst, NUL-terminated.
@@ -94,16 +95,161 @@ int http_parse_url(const char *url, size_t url_len,
                         (size_t)(path_end - path_start));
 }
 
+/* Case-insensitive prefix compare: does a header line start with "prefix:"? */
+static int header_line_is(const char *line, size_t line_len,
+                          const char *prefix)
+{
+    size_t plen = strlen(prefix);
+    if (line_len < plen + 1) return 0;
+    for (size_t i = 0; i < plen; i++) {
+        char a = line[i];
+        char b = prefix[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return 0;
+    }
+    return line[plen] == ':';
+}
+
+/* Append a NUL-terminated string to a write cursor, bounds-checked.
+ * Returns 0 on success, -1 if it won't fit. */
+static int append_str(char **cursor, char *end, const char *s)
+{
+    size_t n = strlen(s);
+    if ((size_t)(end - *cursor) < n) return -1;
+    memcpy(*cursor, s, n);
+    *cursor += n;
+    return 0;
+}
+
+/* Append raw bytes. Same semantics. */
+static int append_bytes(char **cursor, char *end, const char *s, size_t n)
+{
+    if ((size_t)(end - *cursor) < n) return -1;
+    memcpy(*cursor, s, n);
+    *cursor += n;
+    return 0;
+}
+
+static int method_has_body(const char *method)
+{
+    return strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0;
+}
+
+/*
+ * Build a complete HTTP/1.1 request into out_buf.
+ *
+ * Always emits Host: <host> first (library-controlled, not user-
+ * overridable to prevent TLS SNI mismatches). Always emits
+ * Connection: close. Emits User-Agent: Certainly/0.1 unless the
+ * user supplied their own. Emits Content-Length when method is
+ * POST or PUT with a non-NULL body.
+ *
+ * User-supplied headers are parsed from a flat block separated by
+ * '\n' or '\r\n'. Blank lines are skipped. Duplicates of the library-
+ * controlled headers (Host, Connection, Content-Length) are
+ * stripped. All user headers are re-emitted with CRLF.
+ *
+ * For GET and DELETE methods, any supplied body is silently stripped.
+ *
+ * Returns the number of bytes written, or -1 on output overflow.
+ */
 int http_build_request(const char *method, const char *host,
                        const char *path,
                        const char *user_headers, size_t user_headers_len,
                        const char *body, size_t body_len,
                        char *out_buf, size_t out_cap)
 {
-    (void)method; (void)host; (void)path;
-    (void)user_headers; (void)user_headers_len;
-    (void)body; (void)body_len; (void)out_buf; (void)out_cap;
-    return -1;  /* filled in by Task 4 */
+    char *cur = out_buf;
+    char *end = out_buf + out_cap;
+
+    /* Request line */
+    if (append_str(&cur, end, method) != 0) return -1;
+    if (append_str(&cur, end, " ")    != 0) return -1;
+    if (append_str(&cur, end, path)   != 0) return -1;
+    if (append_str(&cur, end, " HTTP/1.1\r\n") != 0) return -1;
+
+    /* Host is always ours */
+    if (append_str(&cur, end, "Host: ") != 0) return -1;
+    if (append_str(&cur, end, host)     != 0) return -1;
+    if (append_str(&cur, end, "\r\n")   != 0) return -1;
+
+    /* Scan user headers for User-Agent override. */
+    int user_has_ua = 0;
+    if (user_headers && user_headers_len > 0) {
+        const char *p = user_headers;
+        const char *e = user_headers + user_headers_len;
+        while (p < e) {
+            const char *line_end = p;
+            while (line_end < e && *line_end != '\n' && *line_end != '\r')
+                line_end++;
+            if (header_line_is(p, (size_t)(line_end - p), "User-Agent"))
+                user_has_ua = 1;
+            /* advance past CR, LF, or CRLF */
+            if (line_end < e && *line_end == '\r') line_end++;
+            if (line_end < e && *line_end == '\n') line_end++;
+            p = line_end;
+        }
+    }
+
+    if (!user_has_ua) {
+        if (append_str(&cur, end, "User-Agent: Certainly/0.1\r\n") != 0)
+            return -1;
+    }
+
+    /* Always close. */
+    if (append_str(&cur, end, "Connection: close\r\n") != 0) return -1;
+
+    /* User-supplied headers, with Host:, Connection:, and Content-Length:
+     * stripped. LF-only lines get CRLF. Emitted before Content-Length so
+     * Content-Type (and friends) appear before the length line. */
+    if (user_headers && user_headers_len > 0) {
+        const char *p = user_headers;
+        const char *e = user_headers + user_headers_len;
+        while (p < e) {
+            const char *line_end = p;
+            while (line_end < e && *line_end != '\n' && *line_end != '\r')
+                line_end++;
+            size_t line_len = (size_t)(line_end - p);
+
+            /* Skip blank lines */
+            if (line_len > 0) {
+                int drop = header_line_is(p, line_len, "Host")
+                        || header_line_is(p, line_len, "Connection")
+                        || header_line_is(p, line_len, "Content-Length");
+                if (!drop) {
+                    if (append_bytes(&cur, end, p, line_len) != 0) return -1;
+                    if (append_str(&cur, end, "\r\n") != 0) return -1;
+                }
+            }
+            if (line_end < e && *line_end == '\r') line_end++;
+            if (line_end < e && *line_end == '\n') line_end++;
+            p = line_end;
+        }
+    }
+
+    /* Content-Length (only for methods that carry bodies) */
+    if (method_has_body(method) && body && body_len > 0) {
+        char cl[48];
+        int cn = snprintf(cl, sizeof(cl), "Content-Length: %lu\r\n",
+                          (unsigned long)body_len);
+        if (cn < 0 || (size_t)cn >= sizeof(cl)) return -1;
+        if (append_str(&cur, end, cl) != 0) return -1;
+    }
+
+    /* Blank line terminator */
+    if (append_str(&cur, end, "\r\n") != 0) return -1;
+
+    /* Body (POST/PUT only; GET/DELETE strip silently) */
+    if (method_has_body(method) && body && body_len > 0) {
+        if (append_bytes(&cur, end, body, body_len) != 0) return -1;
+    }
+
+    /* NUL-terminate for callers that use strcmp / strlen */
+    if (cur >= end) return -1;
+    *cur = '\0';
+
+    return (int)(cur - out_buf);
 }
 
 int http_split_response(const char *raw, size_t raw_len,

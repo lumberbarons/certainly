@@ -126,10 +126,119 @@ static void test_smoke(void)
     EXPECT_EQ_INT("harness runs", 1, 1);
 }
 
+static void test_build_request(void)
+{
+    char out[4096];
+    int n;
+
+    /* GET with no body, no user headers */
+    n = http_build_request("GET", "example.com", "/foo",
+                           NULL, 0,
+                           NULL, 0,
+                           out, sizeof(out));
+    const char *expected1 =
+        "GET /foo HTTP/1.1\r\n"
+        "Host: example.com\r\n"
+        "User-Agent: Certainly/0.1\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    EXPECT_EQ_INT("build: GET rc", (int)strlen(expected1), n);
+    EXPECT_EQ_STR("build: GET bytes", expected1, out);
+
+    /* POST with body and Content-Type header */
+    const char *body = "{\"k\":\"v\"}";
+    n = http_build_request("POST", "api.example.com", "/v1/items",
+                           "Content-Type: application/json\r\n",
+                           strlen("Content-Type: application/json\r\n"),
+                           body, strlen(body),
+                           out, sizeof(out));
+    const char *expected2 =
+        "POST /v1/items HTTP/1.1\r\n"
+        "Host: api.example.com\r\n"
+        "User-Agent: Certainly/0.1\r\n"
+        "Connection: close\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 9\r\n"
+        "\r\n"
+        "{\"k\":\"v\"}";
+    EXPECT_EQ_INT("build: POST rc", (int)strlen(expected2), n);
+    EXPECT_EQ_STR("build: POST bytes", expected2, out);
+
+    /* GET with body set — body must be stripped */
+    n = http_build_request("GET", "example.com", "/",
+                           NULL, 0,
+                           "should be ignored",
+                           strlen("should be ignored"),
+                           out, sizeof(out));
+    const char *expected3 =
+        "GET / HTTP/1.1\r\n"
+        "Host: example.com\r\n"
+        "User-Agent: Certainly/0.1\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    EXPECT_EQ_INT("build: GET+body strip rc", (int)strlen(expected3), n);
+    EXPECT_EQ_STR("build: GET+body strip bytes", expected3, out);
+
+    /* User headers with LF-only separators are converted to CRLF */
+    n = http_build_request("GET", "example.com", "/",
+                           "X-One: a\nX-Two: b\n",
+                           strlen("X-One: a\nX-Two: b\n"),
+                           NULL, 0,
+                           out, sizeof(out));
+    const char *expected4 =
+        "GET / HTTP/1.1\r\n"
+        "Host: example.com\r\n"
+        "User-Agent: Certainly/0.1\r\n"
+        "Connection: close\r\n"
+        "X-One: a\r\n"
+        "X-Two: b\r\n"
+        "\r\n";
+    EXPECT_EQ_INT("build: LF headers rc", (int)strlen(expected4), n);
+    EXPECT_EQ_STR("build: LF headers bytes", expected4, out);
+
+    /* User-supplied Host: is stripped (SNI mismatch guard) */
+    n = http_build_request("GET", "real.example.com", "/",
+                           "Host: fake.example.com\r\nX-Foo: bar\r\n",
+                           strlen("Host: fake.example.com\r\nX-Foo: bar\r\n"),
+                           NULL, 0,
+                           out, sizeof(out));
+    const char *expected5 =
+        "GET / HTTP/1.1\r\n"
+        "Host: real.example.com\r\n"
+        "User-Agent: Certainly/0.1\r\n"
+        "Connection: close\r\n"
+        "X-Foo: bar\r\n"
+        "\r\n";
+    EXPECT_EQ_INT("build: strip Host rc", (int)strlen(expected5), n);
+    EXPECT_EQ_STR("build: strip Host bytes", expected5, out);
+
+    /* User-supplied User-Agent: suppresses ours */
+    n = http_build_request("GET", "example.com", "/",
+                           "User-Agent: Custom/1.0\r\n",
+                           strlen("User-Agent: Custom/1.0\r\n"),
+                           NULL, 0,
+                           out, sizeof(out));
+    const char *expected6 =
+        "GET / HTTP/1.1\r\n"
+        "Host: example.com\r\n"
+        "Connection: close\r\n"
+        "User-Agent: Custom/1.0\r\n"
+        "\r\n";
+    EXPECT_EQ_INT("build: custom UA rc", (int)strlen(expected6), n);
+    EXPECT_EQ_STR("build: custom UA bytes", expected6, out);
+
+    /* Overflow */
+    char tiny[32];
+    n = http_build_request("GET", "example.com", "/very/long/path",
+                           NULL, 0, NULL, 0, tiny, sizeof(tiny));
+    EXPECT_EQ_INT("build: overflow", -1, n);
+}
+
 int main(void)
 {
     test_smoke();
     test_parse_url();
+    test_build_request();
 
     printf("\n%d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
