@@ -101,21 +101,29 @@ void ui_init(void)
     }
 
     /* Install default text. TERec uses CR (\r) as its line separator,
-     * not LF (\n). The defaults below give the user a working JSON
-     * REST starting point that they can edit or delete. */
+     * not LF (\n). The defaults below give the user a runnable demo
+     * against the Anthropic Messages API — paste a real key into the
+     * x-api-key header and hit Send. */
     if (gURLTE) {
-        TESetText("https://", 8L, gURLTE);
+        const char *url = "https://api.anthropic.com/v1/messages";
+        TESetText(url, (long)strlen(url), gURLTE);
     }
     if (gHeadersTE) {
         const char *hdefs =
-            "Content-Type: application/json\r"
-            "Accept: application/json";
+            "x-api-key: YOUR_API_KEY_HERE\r"
+            "anthropic-version: 2023-06-01\r"
+            "content-type: application/json";
         TESetText(hdefs, (long)strlen(hdefs), gHeadersTE);
     }
     if (gBodyTE) {
         const char *bdefs =
             "{\r"
-            "  \"key\": \"value\"\r"
+            "  \"model\": \"claude-haiku-4-5\",\r"
+            "  \"max_tokens\": 256,\r"
+            "  \"messages\": [\r"
+            "    {\"role\": \"user\",\r"
+            "     \"content\": \"Write a haiku about Claude running on a classic Mac in 2026.\"}\r"
+            "  ]\r"
             "}";
         TESetText(bdefs, (long)strlen(bdefs), gBodyTE);
     }
