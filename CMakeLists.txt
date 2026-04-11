@@ -37,3 +37,4 @@ target_link_libraries(certainly
 add_subdirectory(examples/hello_toolbox)
 add_subdirectory(examples/hello_ot)
 add_subdirectory(examples/simple_get)
+add_subdirectory(examples/postman)
