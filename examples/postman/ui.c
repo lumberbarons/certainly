@@ -70,6 +70,8 @@ static TEHandle          gResponseTE      = NULL;
 static ControlHandle     gResponseScroll  = NULL;
 static ControlActionUPP  gScrollActionUPP = NULL;
 
+static char gStatusText[256] = "(no request sent)";
+
 /* ── Forward declarations ── */
 static void ComputeLayout(void);
 static void DrawChrome(void);
@@ -465,6 +467,18 @@ static void ComputeLayout(void)
 
 /* ── Drawing ── */
 
+static void DrawStatus(void)
+{
+    EraseRect(&gStatusRect);
+    Str255 p;
+    size_t n = strlen(gStatusText);
+    if (n > 255) n = 255;
+    p[0] = (unsigned char)n;
+    memcpy(&p[1], gStatusText, n);
+    MoveTo(gStatusRect.left, gStatusRect.bottom - 4);
+    DrawString(p);
+}
+
 static void DrawLabel(const Rect *r, const char *text)
 {
     Str255 p;
@@ -511,7 +525,7 @@ static void DrawChrome(void)
     if (gBodyTE)    TEUpdate(&(*gBodyTE)->viewRect,    gBodyTE);
 
     DrawLabel(&gStatusLabelRect,   "Status:");
-    /* Status text itself drawn blank for now. */
+    DrawStatus();
 
     DrawLabel(&gResponseLabelRect, "Response:");
     FrameRect(&gResponseRect);
@@ -598,6 +612,15 @@ void ui_set_response(const char *text, size_t len)
 void ui_clear_response(void)
 {
     ui_set_response("", 0);
+}
+
+void ui_set_status(const char *text)
+{
+    size_t n = strlen(text);
+    if (n >= sizeof(gStatusText)) n = sizeof(gStatusText) - 1;
+    memcpy(gStatusText, text, n);
+    gStatusText[n] = '\0';
+    InvalRect(&gStatusRect);
 }
 
 /* ── Public setters ── */

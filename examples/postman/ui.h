@@ -44,6 +44,10 @@ void ui_set_response(const char *text, size_t len);
 /* Clear the response pane (same as ui_set_response("", 0)). */
 void ui_clear_response(void);
 
+/* Replace the status line text. NUL-terminated input; truncated
+ * at 255 bytes. Queues a redraw for the next update event. */
+void ui_set_status(const char *text);
+
 #ifdef __cplusplus
 }
 #endif
