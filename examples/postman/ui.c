@@ -10,6 +10,7 @@
 #include <Controls.h>
 #include <ControlDefinitions.h>
 #include <TextEdit.h>
+#include <Scrap.h>
 #include <Menus.h>
 #include <ToolUtils.h>
 #include <string.h>
@@ -689,8 +690,29 @@ int ui_handle_menu(long menuChoice)
         break;
 
     case 131:   /* Edit */
-        /* All items disabled; nothing to do. Future: route to TECut/
-         * TECopy/TEPaste for the focused TE. */
+        if (gFocusedTE) {
+            switch (item) {
+            case 3:  /* Cut */
+                ZeroScrap();
+                TECut(gFocusedTE);
+                TEToScrap();
+                break;
+            case 4:  /* Copy */
+                ZeroScrap();
+                TECopy(gFocusedTE);
+                TEToScrap();
+                break;
+            case 5:  /* Paste */
+                TEFromScrap();
+                TEPaste(gFocusedTE);
+                break;
+            case 6:  /* Clear */
+                TEDelete(gFocusedTE);
+                break;
+            default:
+                break;
+            }
+        }
         break;
 
     default:

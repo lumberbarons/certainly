@@ -63,7 +63,7 @@ resource 'MENU' (130, "File") {
 resource 'MENU' (131, "Edit") {
     131,
     textMenuProc,
-    0x00000000,        /* all items initially disabled */
+    0x0000007D,        /* menu + items 2-6 enabled; item 1 (Undo) disabled */
     enabled,
     "Edit",
     {
