@@ -1,4 +1,6 @@
-# Build and run key schedule tests on the HOST machine (not Retro68)
+# Host-side unit tests. These run on the developer's machine (not the
+# Retro68 PowerPC target) so failing tests don't require launching an
+# emulator. Add new test_* binaries here as the suite grows.
 CC = cc
 CFLAGS = -Wall -Wextra -O2 -std=c99
 BEARSSL_INC = ../../bearssl/inc
@@ -29,8 +31,9 @@ test_keysched: test_keysched.c $(SRC)/tls13_keysched.c $(SRC)/tls13_keysched.h
 	$(CC) $(CFLAGS) -I$(BEARSSL_INC) -I$(BEARSSL_SRC) -I$(SRC) \
 		-o $@ test_keysched.c $(SRC)/tls13_keysched.c $(BEARSSL_OBJS)
 
-test: test_keysched
+test: test_keysched test_http
 	./test_keysched
+	./test_http
 
 test_http: test_http.c ../../examples/postman/http.c \
            ../../examples/postman/http.h

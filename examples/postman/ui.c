@@ -508,7 +508,7 @@ static void DrawChrome(void)
         MoveTo(gMethodRect.left + 4, gMethodRect.bottom - 5);
         DrawString(label);
 
-        /* Draw a small 'v' on the right as a cheap disclosure hint. */
+        /* Disclosure indicator. */
         MoveTo(gMethodRect.right - 10, gMethodRect.bottom - 7);
         DrawChar('v');
     }
@@ -684,9 +684,7 @@ int ui_handle_menu(long menuChoice)
         break;
 
     case 129:   /* Apple */
-        /* Item 1 is "About Postman…"; items 3+ are DAs added via
-         * AppendResMenu. For now we don't do anything useful — just
-         * acknowledge the hit so the menu unhilites. */
+        /* Item 1: About; items 3+: desk accessories from AppendResMenu. */
         break;
 
     case 131:   /* Edit */

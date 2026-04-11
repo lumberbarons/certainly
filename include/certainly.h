@@ -1,10 +1,10 @@
 /*
  * certainly.h — Public API for the Certainly TLS library
  *
- * Certainly provides TLS 1.2 connectivity for classic Mac OS 9 apps.
- * It handles the TLS handshake, encryption/decryption, and certificate
- * verification. You provide the plaintext (HTTP requests, etc.) and
- * Certainly handles the crypto.
+ * Certainly provides TLS 1.2 and TLS 1.3 connectivity for classic Mac
+ * OS 9 apps. It handles the handshake, record-layer encryption, and
+ * certificate verification on top of Open Transport. Callers supply
+ * plaintext (HTTP requests, etc.); Certainly handles the crypto.
  *
  * Usage pattern:
  *
@@ -63,6 +63,12 @@ typedef enum {
     kMacTLS_ErrOT
 } MacTLS_Error;
 
+typedef enum {
+    kMacTLS_VersionUnknown = 0,    /* Handshake not yet complete. */
+    kMacTLS_Version12,
+    kMacTLS_Version13
+} MacTLS_Version;
+
 /* ── Library lifecycle ── */
 MacTLS_Error MacTLS_Init(void);
 void         MacTLS_Shutdown(void);
@@ -98,6 +104,10 @@ MacTLS_State MacTLS_GetState(const MacTLS_Context *ctx);
 MacTLS_Error MacTLS_GetError(const MacTLS_Context *ctx);
 OSStatus     MacTLS_GetOTError(const MacTLS_Context *ctx);
 int          MacTLS_GetBearSSLError(const MacTLS_Context *ctx);
+
+/* Returns the negotiated protocol version, or kMacTLS_VersionUnknown
+ * before the handshake completes (state != kMacTLS_Connected). */
+MacTLS_Version MacTLS_GetVersion(const MacTLS_Context *ctx);
 
 /* ── Configuration ── */
 MacTLS_Config *MacTLS_ConfigCreate(void);

@@ -10,3 +10,8 @@ bearssl/build/
 *.ad
 tools/cacerts/
 tests/host/test_keysched
+tests/host/test_http
+.DS_Store
+vm/
+.claude/
+.anubis/

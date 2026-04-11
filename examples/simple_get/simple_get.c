@@ -139,6 +139,7 @@ static void TestOne(WindowPtr window, int line, const TestHost *t)
 {
     MacTLS_Context *ctx;
     MacTLS_State    state, lastState = kMacTLS_Idle;
+    MacTLS_Version  negotiated = kMacTLS_VersionUnknown;
     EventRecord     event;
     char            request[512];
     /* Big enough to hold typical landing pages plus slack. If we fill it,
@@ -215,6 +216,7 @@ static void TestOne(WindowPtr window, int line, const TestHost *t)
 
         case kMacTLS_Connected:
             if (!requestSent) {
+                negotiated = MacTLS_GetVersion(ctx);
                 MacTLS_Write(ctx, request, strlen(request));
                 requestSent = true;
             }
@@ -223,9 +225,13 @@ static void TestOne(WindowPtr window, int line, const TestHost *t)
                 if (space == 0) {
                     /* Buffer full — stop waiting for a close we can't
                      * make room for. Treat the completed read as success. */
+                    const char *vlabel =
+                        negotiated == kMacTLS_Version13 ? "1.3" :
+                        negotiated == kMacTLS_Version12 ? "1.2" : "?";
                     response[totalRead] = '\0';
                     snprintf(status, sizeof(status),
-                             "[%s] OK %dB (buf full)", t->host, totalRead);
+                             "[%s] OK [%s] %dB (buf full)",
+                             t->host, vlabel, totalRead);
                     DrawStatusLine(window, line, status);
                     LogLine(status);
                     done = true;
@@ -259,9 +265,14 @@ static void TestOne(WindowPtr window, int line, const TestHost *t)
                     strcpy(statusLine, "(no status line)");
                 }
             }
-            snprintf(status, sizeof(status),
-                     "[%s] OK %dB %s",
-                     t->host, totalRead, statusLine);
+            {
+                const char *vlabel =
+                    negotiated == kMacTLS_Version13 ? "1.3" :
+                    negotiated == kMacTLS_Version12 ? "1.2" : "?";
+                snprintf(status, sizeof(status),
+                         "[%s] OK [%s] %dB %s",
+                         t->host, vlabel, totalRead, statusLine);
+            }
             DrawStatusLine(window, line, status);
             LogLine(status);
             done = true;

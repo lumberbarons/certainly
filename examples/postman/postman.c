@@ -1,8 +1,9 @@
 /*
- * postman.c — Postman for Mac OS 9
+ * postman.c — Interactive HTTPS tester for Mac OS 9.
  *
- * Interactive HTTPS tester built on the Certainly TLS library.
- * See docs/superpowers/specs/2026-04-11-postman-design.md for the design.
+ * Drives the Certainly TLS library from a classic Toolbox event loop:
+ * reads URL/headers/body from the UI, builds a request, pumps the
+ * handshake to completion, and displays the response.
  */
 
 #include <Quickdraw.h>
@@ -33,8 +34,19 @@ static int             gRequestLen       = 0;
 static char            gResponseBuf[32768];
 static int             gResponseLen      = 0;
 static int             gPrevResponseLen  = 0;
+/* Captured at the first Connected tick so it survives the move to Closed. */
+static MacTLS_Version  gNegotiatedVersion = kMacTLS_VersionUnknown;
 
 /* ── Send flow ──────────────────────────────────────────────────── */
+
+static const char *tls_version_label(MacTLS_Version v)
+{
+    switch (v) {
+    case kMacTLS_Version13: return "TLS 1.3";
+    case kMacTLS_Version12: return "TLS 1.2";
+    default:                return "TLS ?";
+    }
+}
 
 static void format_tls_error(char *out, size_t cap)
 {
@@ -51,7 +63,8 @@ static void finalize_send(void)
     gCancelled       = 0;
     gRequestSent     = 0;
     gRequestLen      = 0;
-    gPrevResponseLen = 0;
+    gPrevResponseLen   = 0;
+    gNegotiatedVersion = kMacTLS_VersionUnknown;
     /* gResponseLen / gResponseBuf retained so the response pane
      * still reflects the last response until a new send starts. */
     ui_set_send_enabled(1);
@@ -66,7 +79,6 @@ static void DriveSendStep(void)
 
     if (!gSending || !gCtx) return;
 
-    /* Cancellation check — Task 16 wires Cmd-. to set gCancelled. */
     if (gCancelled) {
         ui_set_status("Cancelled");
         finalize_send();
@@ -86,9 +98,13 @@ static void DriveSendStep(void)
 
     case kMacTLS_Connected: {
         if (!gRequestSent) {
+            gNegotiatedVersion = MacTLS_GetVersion(gCtx);
             MacTLS_Write(gCtx, gRequestBuf, (size_t)gRequestLen);
             gRequestSent = 1;
-            ui_set_status("Sending request...");
+            snprintf(status, sizeof(status),
+                     "Sending request (%s)...",
+                     tls_version_label(gNegotiatedVersion));
+            ui_set_status(status);
         }
         int space = (int)sizeof(gResponseBuf) - gResponseLen - 1;
         if (space <= 0) {
@@ -105,7 +121,9 @@ static void DriveSendStep(void)
              * a 1 KB boundary, not on every byte. */
             if ((gResponseLen & ~1023) != (gPrevResponseLen & ~1023)) {
                 snprintf(status, sizeof(status),
-                         "Reading response (%d bytes)", gResponseLen);
+                         "Reading response (%s, %d bytes)",
+                         tls_version_label(gNegotiatedVersion),
+                         gResponseLen);
                 ui_set_status(status);
                 gPrevResponseLen = gResponseLen;
             }
@@ -166,9 +184,6 @@ static void finalize_response(int truncated)
         return;
     }
 
-    /* Decode chunked transfer encoding if the server used it.
-     * Anthropic's API (and others) send chunked even when we ask
-     * Connection: close, so this is surprisingly common. */
     static char decoded_body[32768];
     if (http_headers_is_chunked(headers, headers_len)) {
         int dec_len = http_decode_chunked(body, body_len,
@@ -177,20 +192,22 @@ static void finalize_response(int truncated)
             body     = decoded_body;
             body_len = (size_t)dec_len;
         }
-        /* If decoding failed, fall through and show the raw chunked
-         * body — not pretty, but better than hiding the evidence. */
+        /* On decode failure, fall through and display the raw body. */
     }
 
     /* Build the status-line string, optionally suffixed with a
      * truncation note. */
     {
         size_t out_len = status_len;
-        if (out_len > sizeof(status) - 32) out_len = sizeof(status) - 32;
+        if (out_len > sizeof(status) - 48) out_len = sizeof(status) - 48;
         memcpy(status, status_line, out_len);
         status[out_len] = '\0';
-        if (truncated) {
-            strncat(status, "  (truncated to 32K)",
-                    sizeof(status) - out_len - 1);
+        {
+            char tail[48];
+            snprintf(tail, sizeof(tail), "  (%s%s)",
+                     tls_version_label(gNegotiatedVersion),
+                     truncated ? ", truncated to 32K" : "");
+            strncat(status, tail, sizeof(status) - strlen(status) - 1);
         }
     }
     ui_set_status(status);
@@ -288,8 +305,7 @@ static void DoSendAndReceive(void)
         return;
     }
 
-    /* 6. Flip into sending mode. The main loop's next iteration
-     *    will call DriveSendStep (Task 15) to pump the handshake. */
+    /* Enter sending mode; the main loop will drive the handshake. */
     snprintf(status, sizeof(status),
              "Connecting to %s:%u...", host, (unsigned)port);
     ui_set_status(status);

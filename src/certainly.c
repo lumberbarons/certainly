@@ -1043,6 +1043,15 @@ int MacTLS_GetBearSSLError(const MacTLS_Context *ctx)
     return br_ssl_engine_last_error(&((MacTLS_Context *)ctx)->sc.eng);
 }
 
+MacTLS_Version MacTLS_GetVersion(const MacTLS_Context *ctx)
+{
+    /* Only meaningful once the handshake has completed. tls13_active is
+     * latched true after a successful TLS 1.3 handshake; otherwise the
+     * connection ran through BearSSL's T0 engine, which we pin to 1.2. */
+    if (ctx->state != kMacTLS_Connected) return kMacTLS_VersionUnknown;
+    return ctx->tls13_active ? kMacTLS_Version13 : kMacTLS_Version12;
+}
+
 /* ── Configuration ── */
 
 MacTLS_Config *MacTLS_ConfigCreate(void)
