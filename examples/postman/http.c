@@ -13,6 +13,19 @@ static int copy_bounded(char *dst, size_t dst_cap,
     return 0;
 }
 
+/* Parse scheme://host[:port]/path[?query][#fragment] into components.
+ *
+ * Only http:// and https:// schemes are accepted. Default port is
+ * 443 for https, 80 for http. Fragments are stripped. An empty or
+ * missing path is normalized to "/". Both host_out and path_out are
+ * written NUL-terminated on success.
+ *
+ * Returns 0 on success, -1 on any failure (malformed URL, empty
+ * host, port out of range, or output-buffer overflow). On failure
+ * the contents of host_out, path_out, and *port_out are
+ * unspecified — callers must check the return code before using
+ * any output.
+ */
 int http_parse_url(const char *url, size_t url_len,
                    char *host_out, size_t host_cap,
                    uint16_t *port_out,
