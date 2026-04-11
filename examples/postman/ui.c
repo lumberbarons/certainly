@@ -17,15 +17,16 @@
 enum {
     kWinLeft    = 40,
     kWinTop     = 40,
-    kWinWidth   = 560,
+    kWinWidth   = 600,
     kWinHeight  = 400,
 
     kPad        = 10,          /* outer padding */
     kFieldH     = 20,          /* single-line field height */
     kRowGap     = 6,           /* vertical gap between rows */
     kLabelH     = 16,
-    kMultiH     = 55,          /* multiline headers/body height */
-    kResponseH  = 110,
+    kMultiH     = 55,          /* headers field height */
+    kBodyH      = 85,          /* body field height */
+    kResponseH  = 95,
     kButtonW    = 60,
     kScrollW    = 15
 };
@@ -191,10 +192,10 @@ static void ComputeLayout(void)
             kPad + 80, y + kLabelH);
     y += kLabelH;
     SetRect(&gBodyRect, kPad, y,
-            kWinWidth - kPad, y + kMultiH);
+            kWinWidth - kPad, y + kBodyH);
 
     /* Row 4: "Status:" label + drawn status line */
-    y += kMultiH + kRowGap;
+    y += kBodyH + kRowGap;
     SetRect(&gStatusLabelRect, kPad, y,
             kPad + 50, y + kLabelH);
     SetRect(&gStatusRect, kPad + 55, y,
