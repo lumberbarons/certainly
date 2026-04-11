@@ -166,6 +166,21 @@ static void finalize_response(int truncated)
         return;
     }
 
+    /* Decode chunked transfer encoding if the server used it.
+     * Anthropic's API (and others) send chunked even when we ask
+     * Connection: close, so this is surprisingly common. */
+    static char decoded_body[32768];
+    if (http_headers_is_chunked(headers, headers_len)) {
+        int dec_len = http_decode_chunked(body, body_len,
+                                          decoded_body, sizeof(decoded_body));
+        if (dec_len >= 0) {
+            body     = decoded_body;
+            body_len = (size_t)dec_len;
+        }
+        /* If decoding failed, fall through and show the raw chunked
+         * body — not pretty, but better than hiding the evidence. */
+    }
+
     /* Build the status-line string, optionally suffixed with a
      * truncation note. */
     {

@@ -308,3 +308,119 @@ int http_split_response(const char *raw, size_t raw_len,
     *body_len_out    = body_len;
     return 0;
 }
+
+/*
+ * Returns non-zero if the caller-supplied headers block contains a
+ * Transfer-Encoding header whose value (case-insensitive) is exactly
+ * "chunked". Chunk extensions and compound Transfer-Encoding chains
+ * (e.g. "gzip, chunked") are NOT supported — we only recognize the
+ * bare case for simplicity.
+ */
+int http_headers_is_chunked(const char *headers, size_t headers_len)
+{
+    if (!headers || headers_len == 0) return 0;
+
+    const char *p = headers;
+    const char *e = headers + headers_len;
+    while (p < e) {
+        /* Find end of line */
+        const char *line_end = p;
+        while (line_end < e && *line_end != '\r' && *line_end != '\n')
+            line_end++;
+        size_t line_len = (size_t)(line_end - p);
+
+        if (header_line_is(p, line_len, "Transfer-Encoding")) {
+            /* Skip "Transfer-Encoding:" prefix (18 chars), then any
+             * leading whitespace. */
+            const char *v = p + 18;
+            while (v < line_end && (*v == ' ' || *v == '\t')) v++;
+
+            /* Compare the value case-insensitively to "chunked". */
+            if ((size_t)(line_end - v) >= 7) {
+                const char *want = "chunked";
+                int match = 1;
+                for (int i = 0; i < 7; i++) {
+                    char a = v[i];
+                    char b = want[i];
+                    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+                    if (a != b) { match = 0; break; }
+                }
+                if (match) return 1;
+            }
+        }
+
+        /* Advance past CR, LF, or CRLF */
+        if (line_end < e && *line_end == '\r') line_end++;
+        if (line_end < e && *line_end == '\n') line_end++;
+        p = line_end;
+    }
+    return 0;
+}
+
+/* Parse a hex digit. Returns -1 on non-hex. */
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/*
+ * Decode an HTTP/1.1 chunked body into `out`. Returns the number of
+ * decoded bytes, or -1 on malformed input or output overflow. Safe
+ * to pass out == in for in-place decoding (output is always shorter).
+ */
+int http_decode_chunked(const char *in, size_t in_len,
+                        char *out, size_t out_cap)
+{
+    const char *p = in;
+    const char *e = in + in_len;
+    size_t written = 0;
+
+    while (p < e) {
+        /* Parse hex length. */
+        size_t chunk_len = 0;
+        int any_digits = 0;
+        while (p < e) {
+            int d = hex_digit(*p);
+            if (d < 0) break;
+            chunk_len = (chunk_len << 4) | (size_t)d;
+            any_digits = 1;
+            p++;
+        }
+        if (!any_digits) return -1;
+
+        /* Skip optional chunk extension ("; foo=bar"). */
+        while (p < e && *p != '\r' && *p != '\n') p++;
+
+        /* Consume CR, LF, or CRLF after the length line. */
+        if (p < e && *p == '\r') p++;
+        if (p < e && *p == '\n') p++;
+        else return -1;  /* malformed: expected LF after length */
+
+        if (chunk_len == 0) {
+            /* Terminator chunk. Optional trailers follow, then blank
+             * line. We don't parse trailers — just return. */
+            return (int)written;
+        }
+
+        /* Check we have enough input bytes for the chunk data. */
+        if ((size_t)(e - p) < chunk_len) return -1;
+
+        /* Copy into output, bounds-checked. */
+        if (written + chunk_len > out_cap) return -1;
+
+        /* memmove in case out == in (in-place). */
+        memmove(out + written, p, chunk_len);
+        written += chunk_len;
+        p += chunk_len;
+
+        /* Consume trailing CR, LF, or CRLF after chunk data. */
+        if (p < e && *p == '\r') p++;
+        if (p < e && *p == '\n') p++;
+    }
+
+    /* Reached end of input without seeing a terminator chunk. */
+    return -1;
+}

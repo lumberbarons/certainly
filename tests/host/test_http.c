@@ -294,12 +294,94 @@ static void test_split_response(void)
     EXPECT_EQ_INT("split: empty", -1, rc);
 }
 
+static void test_decode_chunked(void)
+{
+    char out[4096];
+    int n;
+
+    /* Simple two-chunk body */
+    const char *in1 =
+        "5\r\n"
+        "Hello\r\n"
+        "6\r\n"
+        " World\r\n"
+        "0\r\n"
+        "\r\n";
+    n = http_decode_chunked(in1, strlen(in1), out, sizeof(out));
+    EXPECT_EQ_INT("chunked: two chunks rc", 11, n);
+    if (n == 11) {
+        out[n] = '\0';
+        EXPECT_EQ_STR("chunked: two chunks str", "Hello World", out);
+    }
+
+    /* Single hex-letter chunk (the Anthropic-style 0xea case) */
+    const char *in2 =
+        "a\r\n"
+        "0123456789\r\n"
+        "0\r\n"
+        "\r\n";
+    n = http_decode_chunked(in2, strlen(in2), out, sizeof(out));
+    EXPECT_EQ_INT("chunked: hex len rc", 10, n);
+
+    /* Chunk extension after hex length */
+    const char *in3 =
+        "5; foo=bar\r\n"
+        "Hello\r\n"
+        "0\r\n"
+        "\r\n";
+    n = http_decode_chunked(in3, strlen(in3), out, sizeof(out));
+    EXPECT_EQ_INT("chunked: extension rc", 5, n);
+
+    /* Missing terminator → error */
+    const char *in4 = "5\r\nHello\r\n";
+    n = http_decode_chunked(in4, strlen(in4), out, sizeof(out));
+    EXPECT_EQ_INT("chunked: no terminator", -1, n);
+
+    /* Malformed hex → error */
+    const char *in5 = "xyz\r\nHello\r\n0\r\n\r\n";
+    n = http_decode_chunked(in5, strlen(in5), out, sizeof(out));
+    EXPECT_EQ_INT("chunked: bad hex", -1, n);
+
+    /* Empty chunked body (just terminator) */
+    const char *in6 = "0\r\n\r\n";
+    n = http_decode_chunked(in6, strlen(in6), out, sizeof(out));
+    EXPECT_EQ_INT("chunked: empty rc", 0, n);
+
+    /* Output overflow */
+    char tiny[4];
+    const char *in7 = "a\r\n0123456789\r\n0\r\n\r\n";
+    n = http_decode_chunked(in7, strlen(in7), tiny, sizeof(tiny));
+    EXPECT_EQ_INT("chunked: overflow", -1, n);
+}
+
+static void test_headers_is_chunked(void)
+{
+    const char *h1 = "Content-Type: application/json\r\nTransfer-Encoding: chunked";
+    EXPECT_EQ_INT("chunked hdr: yes",
+                  1,
+                  http_headers_is_chunked(h1, strlen(h1)));
+
+    const char *h2 = "Transfer-Encoding: CHUNKED\r\nX-Other: v";
+    EXPECT_EQ_INT("chunked hdr: uppercase",
+                  1,
+                  http_headers_is_chunked(h2, strlen(h2)));
+
+    const char *h3 = "Content-Type: text/html\r\nContent-Length: 42";
+    EXPECT_EQ_INT("chunked hdr: no",
+                  0,
+                  http_headers_is_chunked(h3, strlen(h3)));
+
+    EXPECT_EQ_INT("chunked hdr: empty", 0, http_headers_is_chunked("", 0));
+}
+
 int main(void)
 {
     test_smoke();
     test_parse_url();
     test_build_request();
     test_split_response();
+    test_decode_chunked();
+    test_headers_is_chunked();
 
     printf("\n%d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
