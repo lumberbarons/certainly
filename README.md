@@ -4,7 +4,7 @@ Modern TLS 1.3 for classic Mac OS 9.
 
 ![Postman example making a POST to api.anthropic.com/v1/messages over TLS 1.3, running in SheepShaver on Mac OS 9](docs/images/postman.png)
 
-*The Postman example app, running on Mac OS 9 in SheepShaver.*
+*The Postman example app, running on Mac OS 9 in SheepShaver. The connection worked BTW, I'm not screenshotting my API key :)*
 
 Certainly is a static C library that bridges [BearSSL](https://bearssl.org)
 to Open Transport and exposes a non-blocking, pump-loop API designed for the
