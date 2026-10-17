@@ -162,9 +162,10 @@ void MacTLS_SetEntropyProvider(MacTLS_EntropyProvider provider,
                                void *userData);
 
 /*
- * Draw `len` bytes from the trusted generator, e.g. to write back a
- * replacement seed file so the next launch does not repeat this one.
- * Returns kMacTLS_ErrEntropy if no trusted source is available.
+ * Draw `len` >= kMacTLS_MinSeedBytes bytes from the trusted generator,
+ * e.g. to write back a replacement seed file so the next launch does not
+ * repeat this one. Returns kMacTLS_ErrEntropy if `len` is too short or no
+ * trusted source is available.
  */
 MacTLS_Error MacTLS_ExportSeed(void *out, size_t len);
 

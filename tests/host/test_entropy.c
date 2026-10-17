@@ -67,6 +67,13 @@ static int p_constant(void *u, void *out, size_t len)
     return 1;
 }
 
+static int p_static_nonconst(void *u, void *out, size_t len)
+{
+    (void)u;
+    fill_seed((unsigned char *)out, len, 42);
+    return 1;
+}
+
 static int p_counter(void *u, void *out, size_t len)
 {
     unsigned char *n = (unsigned char *)u;
@@ -78,7 +85,10 @@ static int p_counter(void *u, void *out, size_t len)
 
 static void new_engine(br_ssl_client_context *sc, br_x509_minimal_context *xc)
 {
+    static unsigned char iobuf[BR_SSL_BUFSIZE_MONO];
+
     br_ssl_client_init_full(sc, xc, NULL, 0);
+    br_ssl_engine_set_buffer(&sc->eng, iobuf, sizeof(iobuf), 0);
 }
 
 static void test_no_source_fails(void)
@@ -117,6 +127,8 @@ static void test_seed_validation(void)
     CHECK(entropy_seed_trusted(seed, ENTROPY_SEED_BYTES - 1) == kEntropy_Rejected);
     CHECK(entropy_seed_trusted(NULL, 32) == kEntropy_Rejected);
     CHECK(entropy_get_trusted(out, sizeof(out)) == kEntropy_Unavailable);
+    CHECK(entropy_get_trusted(NULL, 32) == kEntropy_Rejected);
+    CHECK(entropy_get_trusted(out, ENTROPY_SEED_BYTES - 1) == kEntropy_Rejected);
 }
 
 static void test_explicit_seed_succeeds_deterministically(void)
@@ -150,6 +162,16 @@ static void test_explicit_seed_succeeds_deterministically(void)
     new_engine(&sc, &xc);
     CHECK(entropy_seed_engine(&sc.eng) == kEntropy_OK);
     CHECK(sc.eng.rng_init_done == 2);
+    CHECK(sc.eng.rng_os_rand_done == 1);
+
+    /* A subsequent failure must clear rng_init_done on a previously seeded engine
+     * and prevent BearSSL's TLS 1.2 reset from falling back to host OS RNG. */
+    entropy_shutdown();
+    CHECK(entropy_seed_engine(&sc.eng) == kEntropy_Unavailable);
+    CHECK(sc.eng.rng_init_done == 0);
+    CHECK(sc.eng.rng_os_rand_done == 1);
+    CHECK(br_ssl_client_reset(&sc, "example.com", 0) == 0);
+    CHECK(br_ssl_engine_last_error(&sc.eng) == BR_ERR_NO_RANDOM);
 }
 
 static void test_supplemental_is_only_additional(void)
@@ -200,6 +222,15 @@ static void test_provider(void)
 
     entropy_set_provider(p_constant, NULL);
     CHECK(entropy_get_trusted(a, sizeof(a)) == kEntropy_Rejected);
+    new_engine(&sc, &xc);
+    CHECK(entropy_seed_engine(&sc.eng) == kEntropy_Rejected);
+    CHECK(sc.eng.rng_init_done != 2);
+
+    /* A provider that repeats the same non-constant 32-byte block is rejected. */
+    reset(0);
+    entropy_set_provider(p_static_nonconst, NULL);
+    CHECK(entropy_get_trusted(a, sizeof(a)) == kEntropy_OK);
+    CHECK(entropy_get_trusted(b, sizeof(b)) == kEntropy_Rejected);
     new_engine(&sc, &xc);
     CHECK(entropy_seed_engine(&sc.eng) == kEntropy_Rejected);
     CHECK(sc.eng.rng_init_done != 2);
@@ -295,6 +326,62 @@ static void test_tls13_requires_trusted_seed(void)
     CHECK(memcmp(hs2.ecdhe_public, hs3.ecdhe_public, 32) == 0);
 }
 
+static void test_tls13_hrr_and_record_bounds(void)
+{
+    static tls13_hs_ctx hs;
+    unsigned char seed[32];
+    br_ssl_client_context sc;
+    br_x509_minimal_context xc;
+    /* Minimal HRR ServerHello record (handshake type 2, HRR sentinel random,
+     * cipher suite 0x1303, supported_versions=0x0304, cookie="ab"). */
+    static const unsigned char hrr_rec[] = {
+        0x16, 0x03, 0x03, 0x00, 0x3A,
+        0x02, 0x00, 0x00, 0x36,
+        0x03, 0x03,
+        0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+        0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+        0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+        0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+        0x00,
+        0x13, 0x03,
+        0x00,
+        0x00, 0x0E,
+        0x00, 0x2B, 0x00, 0x02, 0x03, 0x04,
+        0x00, 0x2C, 0x00, 0x04, 0x00, 0x02, 'a', 'b'
+    };
+    unsigned char rbuf[128];
+    size_t rlen;
+
+    printf("TLS 1.3 HRR retries once and oversized records fail closed\n");
+    fill_seed(seed, sizeof(seed), 8);
+    reset(0);
+    entropy_seed_trusted(seed, sizeof(seed));
+    new_engine(&sc, &xc);
+    CHECK(entropy_seed_engine(&sc.eng) == kEntropy_OK);
+    CHECK(first_step(&hs, &sc.eng) == kTLS13_WantWrite);
+    CHECK(hs.state == kTLS13_RecvServerHello);
+
+    memcpy(rbuf, hrr_rec, sizeof(hrr_rec));
+    rlen = sizeof(hrr_rec);
+    CHECK(tls13_handshake_step(&hs, rbuf, &rlen, "example.com") == kTLS13_OK);
+    CHECK(hs.state == kTLS13_SendClientHello);
+    CHECK(hs.hrr_received == true);
+    CHECK(rlen == 0);
+
+    /* Send retry ClientHello, then ensure WantRead stays in RecvServerHello. */
+    CHECK(tls13_handshake_step(&hs, rbuf, &rlen, "example.com") == kTLS13_WantWrite);
+    CHECK(hs.state == kTLS13_RecvServerHello);
+    CHECK(tls13_handshake_step(&hs, rbuf, &rlen, "example.com") == kTLS13_WantRead);
+    CHECK(hs.state == kTLS13_RecvServerHello);
+
+    /* Oversized ServerHello record header (> 16384) is rejected immediately. */
+    rbuf[0] = 0x16; rbuf[1] = 0x03; rbuf[2] = 0x03;
+    rbuf[3] = 0x40; rbuf[4] = 0x01; /* 16385 */
+    rlen = 5;
+    CHECK(tls13_handshake_step(&hs, rbuf, &rlen, "example.com") == kTLS13_Error);
+    CHECK(hs.error == BR_ERR_TOO_LARGE);
+}
+
 int main(void)
 {
     test_no_source_fails();
@@ -304,6 +391,7 @@ int main(void)
     test_provider();
     test_shutdown_discards_trust();
     test_tls13_requires_trusted_seed();
+    test_tls13_hrr_and_record_bounds();
 
     if (failures) {
         printf("%d check(s) failed\n", failures);

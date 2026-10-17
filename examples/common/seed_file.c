@@ -20,10 +20,14 @@ const char *SeedFromFile(void)
     FSSpec        spec;
     short         ref;
     long          count;
+    OSErr         err;
     unsigned char seed[kSeedBytes];
     unsigned char next[kSeedBytes];
     const char   *result = NULL;
     Str255        name;
+
+    memset(seed, 0, sizeof(seed));
+    memset(next, 0, sizeof(next));
 
     name[0] = (unsigned char)strlen(kSeedFileName);
     memcpy(name + 1, kSeedFileName, name[0]);
@@ -37,8 +41,9 @@ const char *SeedFromFile(void)
     }
 
     count = kSeedBytes;
-    FSRead(ref, &count, seed);
-    if (count < kMacTLS_MinSeedBytes ||
+    err = FSRead(ref, &count, seed);
+    if ((err != noErr && err != eofErr) ||
+        count < kMacTLS_MinSeedBytes ||
         MacTLS_SeedTrusted(seed, (size_t)count) != kMacTLS_OK) {
         result = "No trusted seed: \"" kSeedFileName "\" is too short or invalid";
     } else if (MacTLS_ExportSeed(next, sizeof(next)) != kMacTLS_OK) {
@@ -53,7 +58,12 @@ const char *SeedFromFile(void)
         }
     }
 
-    FSClose(ref);
+    if (FSClose(ref) != noErr ||
+        (result == NULL && FlushVol(NULL, spec.vRefNum) != noErr)) {
+        if (result == NULL) {
+            result = "No trusted seed: cannot renew \"" kSeedFileName "\"";
+        }
+    }
     WipeBytes(seed, sizeof(seed));
     WipeBytes(next, sizeof(next));
 

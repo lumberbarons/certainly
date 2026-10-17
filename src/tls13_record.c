@@ -134,7 +134,9 @@ int tls13_record_decrypt(tls13_record_ctx *ctx,
     size_t payload_len;
     int ok;
 
-    if (ct_len < 1 + TLS13_TAG_SIZE) return -1;
+    if (ct_len < 1 + TLS13_TAG_SIZE || ct_len > TLS13_MAX_CIPHERTEXT_LEN) {
+        return -1;
+    }
 
     payload_len = ct_len - TLS13_TAG_SIZE;
 
@@ -194,6 +196,7 @@ int tls13_record_decrypt(tls13_record_ctx *ctx,
         if (i == 0) return -1; /* all zeros — invalid */
         *out_ct = dec_buf[i - 1];
         *out_len = i - 1;
+        if (*out_len > TLS13_MAX_PLAINTEXT_LEN) return -1;
     }
 
     ctx->seq++;

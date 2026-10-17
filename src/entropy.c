@@ -17,10 +17,13 @@ static uint8_t               g_pool[POOL_SIZE];
 static size_t                g_pool_offset;
 
 static br_hmac_drbg_context  g_drbg;
+static int                   g_drbg_init;
 static int                   g_drbg_seeded;
 
 static entropy_provider_fn   g_provider;
 static void                 *g_provider_user;
+static uint8_t               g_last_provider_raw[ENTROPY_SEED_BYTES];
+static int                   g_has_last_provider_raw;
 
 static void wipe(void *p, size_t len)
 {
@@ -64,9 +67,12 @@ void entropy_shutdown(void)
     wipe(g_pool, sizeof(g_pool));
     g_pool_offset = 0;
     wipe(&g_drbg, sizeof(g_drbg));
+    g_drbg_init = 0;
     g_drbg_seeded = 0;
     g_provider = NULL;
     g_provider_user = NULL;
+    wipe(g_last_provider_raw, sizeof(g_last_provider_raw));
+    g_has_last_provider_raw = 0;
 }
 
 void entropy_add(const void *data, size_t len)
@@ -76,6 +82,8 @@ void entropy_add(const void *data, size_t len)
 
 void entropy_set_provider(entropy_provider_fn fn, void *user)
 {
+    wipe(g_last_provider_raw, sizeof(g_last_provider_raw));
+    g_has_last_provider_raw = 0;
     g_provider = fn;
     g_provider_user = user;
 }
@@ -87,40 +95,48 @@ entropy_status entropy_seed_trusted(const void *seed, size_t len)
         return kEntropy_Rejected;
     }
 
-    if (g_drbg_seeded) {
+    if (g_drbg_init) {
         br_hmac_drbg_update(&g_drbg, seed, len);
     } else {
         br_hmac_drbg_init(&g_drbg, &br_sha256_vtable, seed, len);
-        g_drbg_seeded = 1;
+        g_drbg_init = 1;
     }
+    g_drbg_seeded = 1;
     return kEntropy_OK;
 }
 
 entropy_status entropy_get_trusted(void *out, size_t len)
 {
+    if (out == NULL || len < ENTROPY_SEED_BYTES) {
+        return kEntropy_Rejected;
+    }
+
     if (g_provider != NULL) {
         uint8_t raw[ENTROPY_SEED_BYTES];
-        br_hmac_drbg_context d;
 
         if (!g_provider(g_provider_user, raw, sizeof(raw))) {
             wipe(raw, sizeof(raw));
             return kEntropy_Unavailable;
         }
-        if (!bytes_usable(raw, sizeof(raw))) {
+        if (!bytes_usable(raw, sizeof(raw)) ||
+            (g_has_last_provider_raw &&
+             memcmp(raw, g_last_provider_raw, sizeof(raw)) == 0)) {
             wipe(raw, sizeof(raw));
             return kEntropy_Rejected;
         }
+        memcpy(g_last_provider_raw, raw, sizeof(raw));
+        g_has_last_provider_raw = 1;
 
-        entropy_platform_gather();
-        br_hmac_drbg_init(&d, &br_sha256_vtable, raw, sizeof(raw));
-        br_hmac_drbg_update(&d, g_pool, sizeof(g_pool));
-        br_hmac_drbg_generate(&d, out, len);
+        if (g_drbg_init) {
+            br_hmac_drbg_update(&g_drbg, raw, sizeof(raw));
+        } else {
+            br_hmac_drbg_init(&g_drbg, &br_sha256_vtable, raw, sizeof(raw));
+            g_drbg_init = 1;
+        }
         wipe(raw, sizeof(raw));
-        wipe(&d, sizeof(d));
-        return kEntropy_OK;
+    } else if (!g_drbg_seeded) {
+        return kEntropy_Unavailable;
     }
-
-    if (!g_drbg_seeded) return kEntropy_Unavailable;
 
     entropy_platform_gather();
     br_hmac_drbg_update(&g_drbg, g_pool, sizeof(g_pool));
@@ -132,6 +148,10 @@ entropy_status entropy_seed_engine(br_ssl_engine_context *eng)
 {
     uint8_t seed[ENTROPY_SEED_BYTES];
     entropy_status st;
+
+    if (eng == NULL) return kEntropy_Rejected;
+    eng->rng_init_done = 0;
+    eng->rng_os_rand_done = 1;
 
     st = entropy_get_trusted(seed, sizeof(seed));
     if (st != kEntropy_OK) return st;

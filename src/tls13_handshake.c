@@ -203,12 +203,12 @@ static const uint16_t tls12_cipher_suites[] = {
 
 /*
  * TLS 1.3 cipher suites. Listed in preference order.
- * ChaCha20 first for PPC performance.
+ * ChaCha20 first for PPC performance. Only SHA-256 suites are offered
+ * so the transcript hash does not need to be re-initialized on ServerHello.
  */
 static const uint16_t tls13_cipher_suites[] = {
     TLS13_CHACHA20_POLY1305_SHA256,  /* 0x1303 */
     TLS13_AES_128_GCM_SHA256,       /* 0x1301 */
-    TLS13_AES_256_GCM_SHA384,       /* 0x1302 */
 };
 
 /*
@@ -615,7 +615,6 @@ static size_t tls13_key_len_for_suite(uint16_t suite)
     switch (suite) {
     case TLS13_AES_128_GCM_SHA256:
         return 16;
-    case TLS13_AES_256_GCM_SHA384:
     case TLS13_CHACHA20_POLY1305_SHA256:
         return 32;
     default:
@@ -887,8 +886,9 @@ static tls13_hs_result tls13_parse_server_hello(tls13_hs_ctx *hs,
         tls13_transcript_reset_for_hrr(&hs->transcript);
         tls13_transcript_update(&hs->transcript, msg, hs_msg_len + 4);
 
-        /* Signal caller to resend ClientHello */
-        return kTLS13_WantRead;  /* reused as "need to retry" signal */
+        /* Transition back to SendClientHello to send the retry ClientHello. */
+        hs->state = kTLS13_SendClientHello;
+        return kTLS13_OK;
     }
 
     /*
@@ -1031,6 +1031,10 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
 
     record_type = recv_buf[0];
     record_len = get_u16(recv_buf + 3);
+    if (record_len > TLS13_MAX_PLAINTEXT_LEN) {
+        hs->error = BR_ERR_TOO_LARGE;
+        return kTLS13_Error;
+    }
     total = (size_t)5 + record_len;
 
     /* Check we have the full record */
@@ -1190,6 +1194,10 @@ static tls13_hs_result tls13_read_encrypted_hs(
 
         record_type = recv_buf[0];
         record_len = get_u16(recv_buf + 3);
+        if (record_len > TLS13_MAX_CIPHERTEXT_LEN) {
+            hs->error = BR_ERR_TOO_LARGE;
+            return kTLS13_Error;
+        }
         total = (size_t)5 + record_len;
 
         if (*recv_len < total) {
@@ -1225,6 +1233,10 @@ static tls13_hs_result tls13_read_encrypted_hs(
                                        hs->plain_buf, &pt_len, &inner_ct);
             if (ret != 0) {
                 hs->error = BR_ERR_BAD_MAC;
+                return kTLS13_Error;
+            }
+            if (pt_len > TLS13_MAX_PLAINTEXT_LEN) {
+                hs->error = BR_ERR_TOO_LARGE;
                 return kTLS13_Error;
             }
             hs->plain_len = pt_len;
@@ -2289,18 +2301,9 @@ tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
 
     case kTLS13_RecvServerHello: {
         tls13_hs_result r = tls13_state_recv_server_hello(hs, recv_buf, recv_len);
-        if (r == kTLS13_OK) {
+        if (r == kTLS13_OK && hs->state == kTLS13_RecvServerHello) {
             /* TLS 1.3 ServerHello processed — advance to encrypted phase */
             hs->state = kTLS13_RecvEncryptedExtensions;
-            return kTLS13_OK;
-        }
-        if (r == kTLS13_WantRead && hs->hrr_received) {
-            /*
-             * HelloRetryRequest received — go back to send a new
-             * ClientHello with the cookie and possibly a new key share.
-             */
-            hs->state = kTLS13_SendClientHello;
-            return kTLS13_OK;
         }
         return r;
     }

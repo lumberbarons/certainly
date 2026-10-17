@@ -138,7 +138,7 @@ typedef struct {
      * here, advancing plain_offset. When plain_offset == plain_len,
      * we decrypt the next record.
      */
-    unsigned char       plain_buf[16384];
+    unsigned char       plain_buf[TLS13_MAX_CIPHERTEXT_LEN];
     size_t              plain_len;
     size_t              plain_offset;
 

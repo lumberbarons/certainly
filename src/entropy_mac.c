@@ -14,19 +14,23 @@
 #include <Events.h>        /* TickCount(), GetMouse() */
 #include <LowMem.h>        /* LMGetTicks() */
 #include <Gestalt.h>       /* ReadLocation() */
-#include <OpenTransport.h> /* OTGetTimeStamp() */
+#include <string.h>
 
 #define JITTER_SAMPLES 64
 
 void entropy_platform_gather(void)
 {
     UnsignedWide    usecs, prev;
-    unsigned long   ticks;
+    unsigned long   ticks = 0;
     Point           mouse;
-    OTTimeStamp     otTime;
     MachineLocation loc;
     unsigned char   jitter[JITTER_SAMPLES];
     int             i;
+
+    memset(&usecs, 0, sizeof(usecs));
+    memset(&prev, 0, sizeof(prev));
+    memset(&mouse, 0, sizeof(mouse));
+    memset(&loc, 0, sizeof(loc));
 
     Microseconds(&usecs);
     entropy_add(&usecs, sizeof(usecs));
@@ -39,9 +43,6 @@ void entropy_platform_gather(void)
 
     ticks = LMGetTicks();
     entropy_add(&ticks, sizeof(ticks));
-
-    OTGetTimeStamp(&otTime);
-    entropy_add(&otTime, sizeof(otTime));
 
     ReadLocation(&loc);
     entropy_add(&loc, sizeof(loc));

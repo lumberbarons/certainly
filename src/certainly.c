@@ -231,6 +231,13 @@ static MacTLS_State tls13_mark_connected(MacTLS_Context *ctx)
     return ctx->state;
 }
 
+static MacTLS_Error map_bearssl_error(int err)
+{
+    if (err == BR_ERR_NO_RANDOM) return kMacTLS_ErrEntropy;
+    if (err > BR_ERR_X509_OK && err < 64) return kMacTLS_ErrCertificate;
+    return kMacTLS_ErrHandshake;
+}
+
 static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
 {
     tls13_hs_result r;
@@ -297,7 +304,8 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
                  ctx->transport->disconnectReceived) &&
                 ctx->tls13_recv_len == 0 &&
                 ctx->hs13.plain_offset >= ctx->hs13.plain_len) {
-                ctx->state = kMacTLS_Closed;
+                ctx->state = kMacTLS_Error;
+                ctx->error = kMacTLS_ErrHandshake;
                 return ctx->state;
             }
             if (!ctx->transport->ordRelReceived &&
@@ -386,8 +394,7 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
 
     case kTLS13_Error:
         ctx->state = kMacTLS_Error;
-        ctx->error = (ctx->hs13.error == BR_ERR_NO_RANDOM)
-                         ? kMacTLS_ErrEntropy : kMacTLS_ErrHandshake;
+        ctx->error = map_bearssl_error(ctx->hs13.error);
         break;
 
     default:
@@ -482,7 +489,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         uint16_t record_len;
         uint8_t record_type;
         size_t total_record;
-        unsigned char decrypted[16384];
+        unsigned char decrypted[TLS13_MAX_CIPHERTEXT_LEN];
         size_t dec_len;
         uint8_t inner_ct;
         int ret;
@@ -490,6 +497,11 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         record_type = ctx->tls13_recv_buf[0];
         record_len = (uint16_t)((ctx->tls13_recv_buf[3] << 8) |
                                  ctx->tls13_recv_buf[4]);
+        if (record_len > TLS13_MAX_CIPHERTEXT_LEN) {
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrRead;
+            return;
+        }
 
         total_record = 5 + record_len;
         if (ctx->tls13_recv_len < total_record) {
@@ -533,7 +545,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         ret = tls13_record_decrypt(&ctx->hs13.read_ctx,
                                    ctx->tls13_recv_buf + 5, record_len,
                                    decrypted, &dec_len, &inner_ct);
-        if (ret != 0) {
+        if (ret != 0 || dec_len > TLS13_MAX_PLAINTEXT_LEN) {
             ctx->state = kMacTLS_Error;
             ctx->error = kMacTLS_ErrRead;
             return;
@@ -657,12 +669,20 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
              * data in the TLS 1.3 buffers, treat it as a graceful close so
              * the app can still read the response data.
              */
-            if (ctx->tls13_active && ctx->state == kMacTLS_Connected) {
-                /* Let tls13_recv_records process any remaining data. */
-                tls13_recv_records(ctx);
-                /* If there's still undrained app data, stay Connected. */
-                if (ctx->tls13_app_offset < ctx->tls13_app_len) {
-                    return ctx->state;
+            if (ctx->state == kMacTLS_Connected) {
+                if (ctx->tls13_active) {
+                    /* Let tls13_recv_records process any remaining data. */
+                    tls13_recv_records(ctx);
+                    /* If there's still undrained app data, stay Connected. */
+                    if (ctx->tls13_app_offset < ctx->tls13_app_len) {
+                        return ctx->state;
+                    }
+                } else {
+                    size_t avail = 0;
+                    if (br_ssl_engine_recvapp_buf(&ctx->sc.eng, &avail) != NULL &&
+                        avail > 0) {
+                        return ctx->state;
+                    }
                 }
                 ctx->state = kMacTLS_Closed;
                 return ctx->state;
@@ -755,16 +775,9 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
         int err = br_ssl_engine_last_error(&ctx->sc.eng);
         if (err == BR_ERR_OK) {
             ctx->state = kMacTLS_Closed;
-        } else if (err == BR_ERR_X509_NOT_TRUSTED ||
-                   err == BR_ERR_X509_BAD_SERVER_NAME) {
-            ctx->state = kMacTLS_Error;
-            ctx->error = kMacTLS_ErrCertificate;
-        } else if (err == BR_ERR_NO_RANDOM) {
-            ctx->state = kMacTLS_Error;
-            ctx->error = kMacTLS_ErrEntropy;
         } else {
             ctx->state = kMacTLS_Error;
-            ctx->error = kMacTLS_ErrHandshake;
+            ctx->error = map_bearssl_error(err);
         }
         return ctx->state;
     }
@@ -779,14 +792,20 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
             } else if (n < 0) {
                 /*
                  * Send failed. If the peer already closed the connection
-                 * (orderly release or disconnect), this is expected —
-                 * e.g., server sent "Connection: close" and shut down.
-                 * Treat as closed, not as an error.
+                 * after the handshake completed, treat as closed, not as
+                 * an error; during the handshake, a peer close is a
+                 * handshake failure.
                  */
                 if (ctx->transport->ordRelReceived ||
                     ctx->transport->disconnectReceived) {
                     br_ssl_engine_close(&ctx->sc.eng);
-                    ctx->state = kMacTLS_Closed;
+                    if (ctx->state == kMacTLS_Connected ||
+                        ctx->state == kMacTLS_Closing) {
+                        ctx->state = kMacTLS_Closed;
+                    } else {
+                        ctx->state = kMacTLS_Error;
+                        ctx->error = kMacTLS_ErrHandshake;
+                    }
                     return ctx->state;
                 }
                 ctx->state = kMacTLS_Error;
@@ -809,11 +828,17 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
             if (n > 0) {
                 br_ssl_engine_recvrec_ack(&ctx->sc.eng, n);
             } else if (n < 0) {
-                /* Recv failed — if peer closed, treat as normal close */
+                /* Recv failed — if peer closed post-handshake, treat as normal close */
                 if (ctx->transport->ordRelReceived ||
                     ctx->transport->disconnectReceived) {
                     br_ssl_engine_close(&ctx->sc.eng);
-                    ctx->state = kMacTLS_Closed;
+                    if (ctx->state == kMacTLS_Connected ||
+                        ctx->state == kMacTLS_Closing) {
+                        ctx->state = kMacTLS_Closed;
+                    } else {
+                        ctx->state = kMacTLS_Error;
+                        ctx->error = kMacTLS_ErrHandshake;
+                    }
                     return ctx->state;
                 }
                 ctx->state = kMacTLS_Error;
@@ -1132,7 +1157,7 @@ void MacTLS_SetEntropyProvider(MacTLS_EntropyProvider provider,
 
 MacTLS_Error MacTLS_ExportSeed(void *out, size_t len)
 {
-    if (out == NULL || len == 0) return kMacTLS_ErrEntropy;
+    if (out == NULL || len < kMacTLS_MinSeedBytes) return kMacTLS_ErrEntropy;
     return entropy_get_trusted(out, len) == kEntropy_OK
                ? kMacTLS_OK : kMacTLS_ErrEntropy;
 }
