@@ -201,6 +201,18 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
  * I/O — it reads directly from the recv_buf we pass in and consumes
  * complete records by sliding them off the front of the buffer.
  */
+/*
+ * Handshake -> connected transition. Single source of truth: both the
+ * full-flush fast path below and the post-step completion check call this,
+ * so completion policy cannot drift between the two.
+ */
+static MacTLS_State tls13_mark_connected(MacTLS_Context *ctx)
+{
+    ctx->state = kMacTLS_Connected;
+    ctx->tls13_active = true;
+    return ctx->state;
+}
+
 static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
 {
     tls13_hs_result r;
@@ -226,14 +238,19 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
             ctx->error = kMacTLS_ErrWrite;
             return ctx->state;
         }
-        /*
-         * Always return after a send attempt — do NOT fall through to
-         * call handshake_step, which could overwrite msg_buf. We'll
-         * come back next pump to either continue sending or advance
-         * the state machine.
-         */
-        ctx->state = kMacTLS_Handshaking;
-        return ctx->state;
+        /* Only advance after the entire message has been sent: the next
+         * handshake step may overwrite msg_buf. A successful full flush
+         * can proceed immediately, saving a cooperative event-loop tick.
+         * Each pump still attempts at most one send, recv and step. */
+        if (ctx->hs13.msg_offset < ctx->hs13.msg_len) {
+            ctx->state = kMacTLS_Handshaking;
+            return ctx->state;
+        }
+        /* Finished is the last flight. Report completion immediately,
+         * without a recv that could observe the peer's orderly close. */
+        if (ctx->hs13.state == kTLS13_Complete) {
+            return tls13_mark_connected(ctx);
+        }
     }
 
     /*
@@ -368,8 +385,7 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
          * Switch to connected state. From here, MacTLS_Read/Write
          * will use the TLS 1.3 record layer directly.
          */
-        ctx->state = kMacTLS_Connected;
-        ctx->tls13_active = true;
+        return tls13_mark_connected(ctx);
     }
 
     return ctx->state;
@@ -734,6 +750,11 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
             }
         }
     }
+
+    /* A send ACK may release the mono buffer for receiving. Refresh
+     * the engine state so we can use it in this pump instead of waiting
+     * for the next cooperative event-loop tick. */
+    st = br_ssl_engine_current_state(&ctx->sc.eng);
 
     /* Receive: OT -> BearSSL */
     if (st & BR_SSL_RECVREC) {
