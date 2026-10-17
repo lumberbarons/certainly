@@ -29,7 +29,7 @@ MacTLS_Error MacTLS_Init(void)
 
 void MacTLS_Shutdown(void)
 {
-    /* Currently nothing to clean up at library level */
+    entropy_shutdown();
 }
 
 /* ── BearSSL setup helpers ── */
@@ -53,7 +53,7 @@ void MacTLS_Shutdown(void)
  *
  *   We offer modern AEAD suites only. The server picks the best one it supports.
  */
-static void setup_bearssl(MacTLS_Context *ctx)
+static MacTLS_Error setup_bearssl(MacTLS_Context *ctx)
 {
     /*
      * Cipher suites, in preference order.
@@ -108,8 +108,15 @@ static void setup_bearssl(MacTLS_Context *ctx)
     br_ssl_engine_set_buffer(&ctx->sc.eng, ctx->iobuf,
                              sizeof(ctx->iobuf), 0);
 
-    /* Seed the PRNG with our entropy pool */
-    entropy_seed_engine(&ctx->sc.eng);
+    /*
+     * Seed the PRNG from the trusted source. Both the TLS 1.3 handshake
+     * and BearSSL's TLS 1.2 engine draw their private keys from this
+     * generator, so refusing here keeps either path from generating key
+     * material without trusted entropy.
+     */
+    if (entropy_seed_engine(&ctx->sc.eng) != kEntropy_OK) {
+        return kMacTLS_ErrEntropy;
+    }
 
     /*
      * Initialize the TLS 1.3 handshake context.
@@ -136,6 +143,7 @@ static void setup_bearssl(MacTLS_Context *ctx)
      * record I/O buffers. br_ssl_client_reset() is only called on the
      * TLS 1.2 fallback path (see tls13_pump_handshake / kTLS13_Fallback12).
      */
+    return kMacTLS_OK;
 }
 
 /* ── Connection lifecycle ── */
@@ -149,6 +157,7 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
                                         MacTLS_Config *cfg)
 {
     MacTLS_Context *ctx;
+    MacTLS_Error err;
 
     ctx = (MacTLS_Context *)NewPtrClear(sizeof(MacTLS_Context));
     if (ctx == NULL) return NULL;
@@ -170,6 +179,18 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
     strncpy(ctx->host, host, sizeof(ctx->host) - 1);
     ctx->host[sizeof(ctx->host) - 1] = '\0';
 
+    /*
+     * Set up BearSSL (doesn't do any I/O yet — just configures). This is
+     * also where the trusted seed is required, so a missing one fails
+     * before any connection is opened.
+     */
+    err = setup_bearssl(ctx);
+    if (err != kMacTLS_OK) {
+        ctx->state = kMacTLS_Error;
+        ctx->error = err;
+        return ctx;
+    }
+
     /* Start TCP connection */
     ctx->transport = ot_transport_create(host, port);
     if (ctx->transport == NULL) {
@@ -177,9 +198,6 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
         ctx->error = kMacTLS_ErrMemory;
         return ctx;
     }
-
-    /* Set up BearSSL (doesn't do any I/O yet — just configures) */
-    setup_bearssl(ctx);
 
     return ctx;
 }
@@ -368,7 +386,8 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
 
     case kTLS13_Error:
         ctx->state = kMacTLS_Error;
-        ctx->error = kMacTLS_ErrHandshake;
+        ctx->error = (ctx->hs13.error == BR_ERR_NO_RANDOM)
+                         ? kMacTLS_ErrEntropy : kMacTLS_ErrHandshake;
         break;
 
     default:
@@ -740,6 +759,9 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
                    err == BR_ERR_X509_BAD_SERVER_NAME) {
             ctx->state = kMacTLS_Error;
             ctx->error = kMacTLS_ErrCertificate;
+        } else if (err == BR_ERR_NO_RANDOM) {
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrEntropy;
         } else {
             ctx->state = kMacTLS_Error;
             ctx->error = kMacTLS_ErrHandshake;
@@ -1095,6 +1117,25 @@ MacTLS_Error MacTLS_ConfigAddCA(MacTLS_Config *cfg,
 }
 
 /* ── Entropy ── */
+
+MacTLS_Error MacTLS_SeedTrusted(const void *seed, size_t len)
+{
+    return entropy_seed_trusted(seed, len) == kEntropy_OK
+               ? kMacTLS_OK : kMacTLS_ErrEntropy;
+}
+
+void MacTLS_SetEntropyProvider(MacTLS_EntropyProvider provider,
+                               void *userData)
+{
+    entropy_set_provider(provider, userData);
+}
+
+MacTLS_Error MacTLS_ExportSeed(void *out, size_t len)
+{
+    if (out == NULL || len == 0) return kMacTLS_ErrEntropy;
+    return entropy_get_trusted(out, len) == kEntropy_OK
+               ? kMacTLS_OK : kMacTLS_ErrEntropy;
+}
 
 void MacTLS_AddEntropy(const void *data, size_t len)
 {

@@ -15,3 +15,5 @@ tests/host/test_http
 vm/
 .claude/
 .anubis/
+tests/host/test_entropy
+tests/host/obj/

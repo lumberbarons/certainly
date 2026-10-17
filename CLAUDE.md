@@ -46,6 +46,7 @@ unknown" in source files under `src/` or `examples/`, that is expected
 | `src/certainly.c`     | Public-API entry points and the BearSSL ↔ OT pump. |
 | `src/ot_transport.c`  | Async Open Transport TCP — connect, send, receive. |
 | `src/tls13_*.c`       | TLS 1.3 handshake, key schedule, record layer. |
+| `src/entropy.c`       | Trusted-seed requirement and provider (portable; host-tested). `entropy_mac.c` holds the supplemental Mac inputs. |
 | `src/ca_roots.c`      | Generated Mozilla trust anchors (do not hand-edit). |
 | `tools/`              | CA bundle regeneration script and helpers. |
 | `examples/postman/`   | HTTPS request builder. UI is split into `ui.c`, HTTP in `http.c`, glue in `postman.c`. |
@@ -70,6 +71,18 @@ unknown" in source files under `src/` or `examples/`, that is expected
 - **Comments.** Explain *why*, not *what*. Do not leave commentary about
   previous attempts, in-progress fixes, or task numbers in the source.
 
+## Entropy
+
+Mac OS 9 has no verifiable entropy source, so key generation requires an
+application-supplied trusted seed (`MacTLS_SeedTrusted` /
+`MacTLS_SetEntropyProvider`). `MacTLS_Create*` must fail with
+`kMacTLS_ErrEntropy` before any key is generated if there is none, and the
+TLS 1.3 handshake must check the engine DRBG was seeded that way. Timer,
+mouse and settings values are supplemental input only: never count them as
+entropy, never let them make seeding succeed, and never read uninitialised
+memory as a source. Keep Mac OS calls in `entropy_mac.c` so `entropy.c`
+stays testable on the host.
+
 ## TLS version strategy
 
 `MacTLS_Create` always begins with a TLS 1.3 ClientHello that also
@@ -85,7 +98,8 @@ explicitly rejected to keep the transcript hash logic simple.
 ## Testing
 
 - **Host tests** (`tests/host/`) — must pass before any commit that
-  touches the key schedule, HTTP parser, or any other portable code.
+  touches the key schedule, HTTP parser, entropy handling, or any other
+  portable code.
   Run with `make test` from that directory.
 - **Emulator smoke tests** — for changes to the OT transport, handshake
   driver, or example apps, build with Retro68 and exercise the resulting

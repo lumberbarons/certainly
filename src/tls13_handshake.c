@@ -8,7 +8,6 @@
  */
 
 #include "tls13_handshake.h"
-#include "entropy.h"
 #include <string.h>
 
 /* ── Wire Format Helpers ── */
@@ -141,9 +140,10 @@ void tls13_handshake_init(tls13_hs_ctx *hs)
  * (with clamping applied by BearSSL internally), and the public key
  * is the X25519 public point (also 32 bytes).
  *
- * The PRNG is seeded from our entropy pool via a standalone
- * br_hmac_drbg_context — we can't use BearSSL's engine PRNG because
- * the engine hasn't started its own handshake.
+ * The PRNG is a standalone br_hmac_drbg_context seeded from the engine's
+ * DRBG, which the library seeds from the trusted entropy source — we
+ * can't use the engine PRNG directly because the engine hasn't started
+ * its own handshake.
  */
 static int tls13_generate_x25519_keypair(tls13_hs_ctx *hs,
                                          br_hmac_drbg_context *rng)
@@ -2181,27 +2181,18 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
     /*
      * Initialize a standalone PRNG for key generation and random bytes.
      *
-     * We can't use BearSSL's engine PRNG because the engine hasn't
-     * started its own handshake (we're bypassing T0). Instead, we
-     * create our own HMAC_DRBG seeded from the entropy pool.
-     *
-     * We extract seed material by injecting entropy into the engine
-     * (which has already been done by certainly.c) and then using
-     * the engine's PRNG to generate our seed. If the engine's PRNG
-     * is available, use it; otherwise seed from the raw entropy pool.
+     * We can't use BearSSL's engine PRNG directly because the engine
+     * hasn't started its own handshake (we're bypassing T0), so we
+     * derive a seed from it. The engine PRNG is only trustworthy if
+     * certainly.c seeded it from the trusted entropy source; refuse to
+     * go any further, and in particular to generate a private key,
+     * otherwise.
      */
-    if (eng->rng_init_done) {
-        /* Engine PRNG is seeded — use it to seed our standalone PRNG */
-        br_hmac_drbg_generate(&eng->rng, seed, sizeof(seed));
-    } else {
-        /*
-         * Engine PRNG not ready — seed the engine first, then use it.
-         * entropy_seed_engine() injects pool data into the engine's
-         * HMAC_DRBG.
-         */
-        entropy_seed_engine(eng);
-        br_hmac_drbg_generate(&eng->rng, seed, sizeof(seed));
+    if (eng->rng_init_done != 2) {
+        hs->error = BR_ERR_NO_RANDOM;
+        return kTLS13_Error;
     }
+    br_hmac_drbg_generate(&eng->rng, seed, sizeof(seed));
 
     br_hmac_drbg_init(&rng, &br_sha256_vtable, seed, sizeof(seed));
 
