@@ -39,9 +39,8 @@
  * purposes (different labels or different transcript states) are
  * always different, even from the same base secret.
  */
-static void hkdf_expand_label(
-    const br_hash_class *hash,
-    const void *secret, size_t secret_len,
+static void hkdf_expand_label_key(
+    const br_hmac_key_context *kc,
     const char *label, size_t label_len,
     const void *context, size_t context_len,
     void *out, size_t out_len)
@@ -96,12 +95,10 @@ static void hkdf_expand_label(
          * For TLS 1.3, output is always <= hash_len, so we only need T(1):
          *   T(1) = HMAC(PRK, info || 0x01)
          */
-        br_hmac_key_context kc;
         br_hmac_context mc;
         unsigned char one = 0x01;
 
-        br_hmac_key_init(&kc, hash, secret, secret_len);
-        br_hmac_init(&mc, &kc, 0);
+        br_hmac_init(&mc, kc, 0);
         br_hmac_update(&mc, info, info_len);
         br_hmac_update(&mc, &one, 1);
         {
@@ -124,6 +121,24 @@ static void hkdf_expand_label(
          * more than needed. For TLS 1.3, out_len is always either
          * hash_len (for secrets) or key_len/iv_len (for traffic keys). */
     }
+}
+
+/* Single-use labels prepare their own HMAC key. Traffic-key derivation below
+ * shares the prepared inner/outer hash states between labels with the same
+ * secret, avoiding two hash-block compressions per redundant key setup. */
+static void hkdf_expand_label(
+    const br_hash_class *hash,
+    const void *secret, size_t secret_len,
+    const char *label, size_t label_len,
+    const void *context, size_t context_len,
+    void *out, size_t out_len)
+{
+    br_hmac_key_context kc;
+
+    br_hmac_key_init(&kc, hash, secret, secret_len);
+    hkdf_expand_label_key(&kc, label, label_len,
+                          context, context_len, out, out_len);
+    memset(&kc, 0, sizeof(kc));
 }
 
 /*
@@ -233,6 +248,58 @@ void tls13_ks_extract_handshake(tls13_keysched *ks,
     memset(derived, 0, sizeof(derived));
 }
 
+/* All traffic keys use two labels per secret. A BearSSL HMAC key context
+ * is immutable during expansion, so preparing it once preserves HKDF output
+ * while removing repeated inner/outer pad hashing. Keep it local to this
+ * operation: changing key-schedule stages must never reuse stale states.
+ * Labels carry their lengths explicitly: the HKDF info field must agree
+ * with the string the caller passes, whatever its length. */
+static void derive_traffic_keys(tls13_keysched *ks,
+                                const void *transcript_hash,
+                                const char *client_label, size_t client_label_len,
+                                const char *server_label, size_t server_label_len,
+                                size_t key_len,
+                                void *client_key, void *client_iv,
+                                void *server_key, void *server_iv,
+                                void *client_secret_out,
+                                void *server_secret_out)
+{
+    unsigned char client_secret[64];
+    unsigned char server_secret[64];
+    br_hmac_key_context kc;
+
+    br_hmac_key_init(&kc, ks->hash, ks->secret, ks->hash_len);
+    hkdf_expand_label_key(&kc, client_label, client_label_len,
+                          transcript_hash, ks->hash_len,
+                          client_secret, ks->hash_len);
+    hkdf_expand_label_key(&kc, server_label, server_label_len,
+                          transcript_hash, ks->hash_len,
+                          server_secret, ks->hash_len);
+
+    if (client_secret_out != NULL) {
+        memcpy(client_secret_out, client_secret, ks->hash_len);
+    }
+    if (server_secret_out != NULL) {
+        memcpy(server_secret_out, server_secret, ks->hash_len);
+    }
+
+    br_hmac_key_init(&kc, ks->hash, client_secret, ks->hash_len);
+    hkdf_expand_label_key(&kc, "key", sizeof("key") - 1, NULL, 0,
+                          client_key, key_len);
+    hkdf_expand_label_key(&kc, "iv", sizeof("iv") - 1, NULL, 0,
+                          client_iv, 12);
+
+    br_hmac_key_init(&kc, ks->hash, server_secret, ks->hash_len);
+    hkdf_expand_label_key(&kc, "key", sizeof("key") - 1, NULL, 0,
+                          server_key, key_len);
+    hkdf_expand_label_key(&kc, "iv", sizeof("iv") - 1, NULL, 0,
+                          server_iv, 12);
+
+    memset(&kc, 0, sizeof(kc));
+    memset(client_secret, 0, sizeof(client_secret));
+    memset(server_secret, 0, sizeof(server_secret));
+}
+
 void tls13_ks_derive_handshake_keys(tls13_keysched *ks,
                                     const void *transcript_hash,
                                     size_t key_len,
@@ -241,48 +308,12 @@ void tls13_ks_derive_handshake_keys(tls13_keysched *ks,
                                     void *client_secret_out,
                                     void *server_secret_out)
 {
-    unsigned char client_secret[64];
-    unsigned char server_secret[64];
-
-    /* Derive client/server handshake traffic secrets */
-    derive_secret(ks->hash, ks->hash_len,
-                  ks->secret,
-                  "c hs traffic", 12,
-                  transcript_hash,
-                  client_secret);
-
-    derive_secret(ks->hash, ks->hash_len,
-                  ks->secret,
-                  "s hs traffic", 12,
-                  transcript_hash,
-                  server_secret);
-
-    /* Copy raw traffic secrets if requested (needed for Finished keys) */
-    if (client_secret_out != NULL) {
-        memcpy(client_secret_out, client_secret, ks->hash_len);
-    }
-    if (server_secret_out != NULL) {
-        memcpy(server_secret_out, server_secret, ks->hash_len);
-    }
-
-    /* Expand traffic secrets into keys and IVs */
-    hkdf_expand_label(ks->hash, client_secret, ks->hash_len,
-                      "key", 3, NULL, 0,
-                      client_key, key_len);
-    hkdf_expand_label(ks->hash, client_secret, ks->hash_len,
-                      "iv", 2, NULL, 0,
-                      client_iv, 12);
-
-    hkdf_expand_label(ks->hash, server_secret, ks->hash_len,
-                      "key", 3, NULL, 0,
-                      server_key, key_len);
-    hkdf_expand_label(ks->hash, server_secret, ks->hash_len,
-                      "iv", 2, NULL, 0,
-                      server_iv, 12);
-
-    /* Zero intermediate secrets */
-    memset(client_secret, 0, sizeof(client_secret));
-    memset(server_secret, 0, sizeof(server_secret));
+    derive_traffic_keys(ks, transcript_hash,
+                        "c hs traffic", sizeof("c hs traffic") - 1,
+                        "s hs traffic", sizeof("s hs traffic") - 1,
+                        key_len,
+                        client_key, client_iv, server_key, server_iv,
+                        client_secret_out, server_secret_out);
 }
 
 void tls13_ks_extract_master(tls13_keysched *ks)
@@ -314,37 +345,12 @@ void tls13_ks_derive_app_keys(tls13_keysched *ks,
                               void *client_key, void *client_iv,
                               void *server_key, void *server_iv)
 {
-    unsigned char client_secret[64];
-    unsigned char server_secret[64];
-
-    derive_secret(ks->hash, ks->hash_len,
-                  ks->secret,
-                  "c ap traffic", 12,
-                  transcript_hash,
-                  client_secret);
-
-    derive_secret(ks->hash, ks->hash_len,
-                  ks->secret,
-                  "s ap traffic", 12,
-                  transcript_hash,
-                  server_secret);
-
-    hkdf_expand_label(ks->hash, client_secret, ks->hash_len,
-                      "key", 3, NULL, 0,
-                      client_key, key_len);
-    hkdf_expand_label(ks->hash, client_secret, ks->hash_len,
-                      "iv", 2, NULL, 0,
-                      client_iv, 12);
-
-    hkdf_expand_label(ks->hash, server_secret, ks->hash_len,
-                      "key", 3, NULL, 0,
-                      server_key, key_len);
-    hkdf_expand_label(ks->hash, server_secret, ks->hash_len,
-                      "iv", 2, NULL, 0,
-                      server_iv, 12);
-
-    memset(client_secret, 0, sizeof(client_secret));
-    memset(server_secret, 0, sizeof(server_secret));
+    derive_traffic_keys(ks, transcript_hash,
+                        "c ap traffic", sizeof("c ap traffic") - 1,
+                        "s ap traffic", sizeof("s ap traffic") - 1,
+                        key_len,
+                        client_key, client_iv, server_key, server_iv,
+                        NULL, NULL);
 }
 
 void tls13_ks_derive_finished_key(tls13_keysched *ks,
