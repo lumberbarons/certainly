@@ -107,8 +107,17 @@ typedef struct {
     unsigned char       client_hs_secret[64];
     unsigned char       server_hs_secret[64];
 
-    /* Buffer for non-certificate handshake messages (outgoing) */
-    unsigned char       msg_buf[4096];
+    /*
+     * Buffer for handshake messages (incoming and outgoing).
+     *
+     * Was 4096, which silently overflowed for Certificate messages
+     * larger than 4 KB: real-world chains run 3-5 KB (Google currently
+     * sends ~4.8 KB), and the memcpy in tls13_read_encrypted_hs() had
+     * no bounds check, corrupting the fields that follow this buffer.
+     * TLS records top out at 16 KB, so 16 KB holds any single-record
+     * handshake message.
+     */
+    unsigned char       msg_buf[16384];
     size_t              msg_len;
     size_t              msg_offset;
 
