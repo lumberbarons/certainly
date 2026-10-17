@@ -1159,6 +1159,16 @@ static tls13_hs_result tls13_read_encrypted_hs(
                 return kTLS13_Error;
             }
 
+            /* Never copy more than the destination can hold: a
+             * Certificate message can exceed 4 KB on real chains, and
+             * an unchecked copy here corrupted the context fields that
+             * follow msg_buf (observed with google.com's ~4.8 KB
+             * chain, which then failed CertificateVerify). */
+            if (total_hs > sizeof(hs->msg_buf)) {
+                hs->error = BR_ERR_TOO_LARGE;
+                return kTLS13_Error;
+            }
+
             /* Copy the handshake message to out_data */
             memcpy(out_data, hs->plain_buf + hs->plain_offset, total_hs);
             *out_len = total_hs;

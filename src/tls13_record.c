@@ -71,6 +71,10 @@ void tls13_record_init(tls13_record_ctx *ctx,
     memcpy(ctx->iv, iv, 12);
     ctx->seq = 0;
     ctx->cipher_suite = cipher_suite;
+    if (cipher_suite != TLS_CHACHA20_POLY1305_SHA256) {
+        br_aes_ct_ctr_init(&ctx->aes, ctx->key, ctx->key_len);
+        br_gcm_init(&ctx->gcm, &ctx->aes.vtable, br_ghash_ctmul32);
+    }
 }
 
 int tls13_record_encrypt(tls13_record_ctx *ctx,
@@ -103,16 +107,15 @@ int tls13_record_encrypt(tls13_record_ctx *ctx,
                               1 /* encrypt */);
     } else {
         /* AES-GCM */
-        br_aes_ct_ctr_keys aes_ctx;
-        br_gcm_context gcm;
-
-        br_aes_ct_ctr_init(&aes_ctx, ctx->key, ctx->key_len);
-        br_gcm_init(&gcm, &aes_ctx.vtable, br_ghash_ctmul32);
-        br_gcm_reset(&gcm, nonce, 12);
-        br_gcm_aad_inject(&gcm, aad, sizeof(aad));
-        br_gcm_flip(&gcm);
-        br_gcm_run(&gcm, 1 /* encrypt */, out_buf, pt_len + 1);
-        br_gcm_get_tag(&gcm, out_buf + pt_len + 1);
+        /* Rebind after a context copy: GCM keeps a pointer to the AES
+         * schedule. Only nonce/counters/AAD change between records. */
+        br_gcm_context *gcm = &ctx->gcm;
+        gcm->bctx = &ctx->aes.vtable;
+        br_gcm_reset(gcm, nonce, 12);
+        br_gcm_aad_inject(gcm, aad, sizeof(aad));
+        br_gcm_flip(gcm);
+        br_gcm_run(gcm, 1 /* encrypt */, out_buf, pt_len + 1);
+        br_gcm_get_tag(gcm, out_buf + pt_len + 1);
     }
 
     *out_len = total_ct_len;
@@ -142,29 +145,42 @@ int tls13_record_decrypt(tls13_record_ctx *ctx,
     memcpy(dec_buf, ciphertext, ct_len);
 
     if (ctx->cipher_suite == TLS_CHACHA20_POLY1305_SHA256) {
+        /*
+         * br_poly1305_ctmul_run decrypts in place but does NOT verify
+         * the tag: it overwrites the tag buffer with the computed tag,
+         * and "the caller is responsible for checking that the computed
+         * tag matches the expected value" (bearssl_block.h). Keep the
+         * received tag and compare — otherwise any record would be
+         * accepted, and a wrong key would go unnoticed.
+         */
+        unsigned char received_tag[16];
+        memcpy(received_tag, dec_buf + payload_len, sizeof(received_tag));
+
         br_poly1305_ctmul_run(ctx->key, nonce,
                               dec_buf, payload_len,
                               aad, sizeof(aad),
-                              dec_buf + payload_len, /* tag */
+                              dec_buf + payload_len, /* computed tag */
                               br_chacha20_ct_run,
                               0 /* decrypt */);
-        /* Check tag — poly1305_run verifies in-place, returns via tag buffer.
-         * We need to check if decryption was authentic. BearSSL's poly1305
-         * function replaces the tag with the computed tag on decrypt.
-         * Compare computed tag with received tag. */
-        ok = 1; /* poly1305_run handles verification internally */
+        {
+            unsigned char diff = 0;
+            size_t i;
+            for (i = 0; i < sizeof(received_tag); i++) {
+                diff |= (unsigned char)(received_tag[i] ^ dec_buf[payload_len + i]);
+            }
+            ok = (diff == 0);
+        }
     } else {
         /* AES-GCM */
-        br_aes_ct_ctr_keys aes_ctx;
-        br_gcm_context gcm;
-
-        br_aes_ct_ctr_init(&aes_ctx, ctx->key, ctx->key_len);
-        br_gcm_init(&gcm, &aes_ctx.vtable, br_ghash_ctmul32);
-        br_gcm_reset(&gcm, nonce, 12);
-        br_gcm_aad_inject(&gcm, aad, sizeof(aad));
-        br_gcm_flip(&gcm);
-        br_gcm_run(&gcm, 0 /* decrypt */, dec_buf, payload_len);
-        ok = br_gcm_check_tag(&gcm, dec_buf + payload_len);
+        /* Rebind after a context copy: GCM keeps a pointer to the AES
+         * schedule. Only nonce/counters/AAD change between records. */
+        br_gcm_context *gcm = &ctx->gcm;
+        gcm->bctx = &ctx->aes.vtable;
+        br_gcm_reset(gcm, nonce, 12);
+        br_gcm_aad_inject(gcm, aad, sizeof(aad));
+        br_gcm_flip(gcm);
+        br_gcm_run(gcm, 0 /* decrypt */, dec_buf, payload_len);
+        ok = br_gcm_check_tag(gcm, dec_buf + payload_len);
     }
 
     if (!ok) return -1;

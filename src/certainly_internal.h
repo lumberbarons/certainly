@@ -81,6 +81,11 @@ struct MacTLS_Context {
     size_t          tls13_app_len;                /* bytes in app_buf */
     size_t          tls13_app_offset;             /* read cursor in app_buf */
 
+    /* One accepted application record, retained across partial OT writes. */
+    unsigned char   tls13_send_buf[5 + 16384 + 1 + TLS13_TAG_SIZE];
+    size_t          tls13_send_len;
+    size_t          tls13_send_offset;
+
     /* True once TLS 1.3 handshake is confirmed (ServerHello chose 1.3) */
     bool            tls13_active;
     /* True once TLS 1.3 handshake has started (ClientHello sent) */

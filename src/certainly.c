@@ -16,6 +16,7 @@
 #include "certainly_internal.h"
 
 #include <Memory.h>   /* NewPtrClear, DisposePtr */
+#include <Events.h>   /* TickCount */
 #include <string.h>
 
 /* ── Library lifecycle ── */
@@ -200,6 +201,18 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
  * I/O — it reads directly from the recv_buf we pass in and consumes
  * complete records by sliding them off the front of the buffer.
  */
+/*
+ * Handshake -> connected transition. Single source of truth: both the
+ * full-flush fast path below and the post-step completion check call this,
+ * so completion policy cannot drift between the two.
+ */
+static MacTLS_State tls13_mark_connected(MacTLS_Context *ctx)
+{
+    ctx->state = kMacTLS_Connected;
+    ctx->tls13_active = true;
+    return ctx->state;
+}
+
 static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
 {
     tls13_hs_result r;
@@ -225,14 +238,19 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
             ctx->error = kMacTLS_ErrWrite;
             return ctx->state;
         }
-        /*
-         * Always return after a send attempt — do NOT fall through to
-         * call handshake_step, which could overwrite msg_buf. We'll
-         * come back next pump to either continue sending or advance
-         * the state machine.
-         */
-        ctx->state = kMacTLS_Handshaking;
-        return ctx->state;
+        /* Only advance after the entire message has been sent: the next
+         * handshake step may overwrite msg_buf. A successful full flush
+         * can proceed immediately, saving a cooperative event-loop tick.
+         * Each pump still attempts at most one send, recv and step. */
+        if (ctx->hs13.msg_offset < ctx->hs13.msg_len) {
+            ctx->state = kMacTLS_Handshaking;
+            return ctx->state;
+        }
+        /* Finished is the last flight. Report completion immediately,
+         * without a recv that could observe the peer's orderly close. */
+        if (ctx->hs13.state == kTLS13_Complete) {
+            return tls13_mark_connected(ctx);
+        }
     }
 
     /*
@@ -367,8 +385,7 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
          * Switch to connected state. From here, MacTLS_Read/Write
          * will use the TLS 1.3 record layer directly.
          */
-        ctx->state = kMacTLS_Connected;
-        ctx->tls13_active = true;
+        return tls13_mark_connected(ctx);
     }
 
     return ctx->state;
@@ -385,9 +402,30 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
  * This function is non-blocking: it processes whatever data is available
  * and returns.
  */
+/* One bounded send per pump; accepted plaintext must never be re-encrypted. */
+static int tls13_flush_application(MacTLS_Context *ctx)
+{
+    int n;
+    if (ctx->tls13_send_offset == ctx->tls13_send_len) return 0;
+    n = ot_transport_send(ctx->transport,
+            ctx->tls13_send_buf + ctx->tls13_send_offset,
+            ctx->tls13_send_len - ctx->tls13_send_offset);
+    if (n < 0) {
+        ctx->error = kMacTLS_ErrWrite;
+        ctx->state = kMacTLS_Error;
+        return -1;
+    }
+    ctx->tls13_send_offset += (size_t)n;
+    return 0;
+}
+
 static void tls13_recv_records(MacTLS_Context *ctx)
 {
     int n;
+
+    /* Drain the previous record before decrypting more: otherwise a second
+     * full record silently overflows the 16 KB application buffer. */
+    if (ctx->tls13_app_offset < ctx->tls13_app_len) return;
 
     /*
      * Step 1: Read raw bytes from OT transport into recv_buf.
@@ -518,6 +556,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
                        decrypted, copy);
                 ctx->tls13_app_len += copy;
             }
+            return; /* Drain this record before decrypting the next one. */
 
         } else if (inner_ct == TLS13_CT_HANDSHAKE) {
             /*
@@ -679,6 +718,7 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
      * TLS 1.3 connected state — process incoming records.
      */
     if (ctx->tls13_active && ctx->state == kMacTLS_Connected) {
+        if (tls13_flush_application(ctx) < 0) return ctx->state;
         tls13_recv_records(ctx);
         return ctx->state;
     }
@@ -734,6 +774,11 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
         }
     }
 
+    /* A send ACK may release the mono buffer for receiving. Refresh
+     * the engine state so we can use it in this pump instead of waiting
+     * for the next cooperative event-loop tick. */
+    st = br_ssl_engine_current_state(&ctx->sc.eng);
+
     /* Receive: OT -> BearSSL */
     if (st & BR_SSL_RECVREC) {
         buf = br_ssl_engine_recvrec_buf(&ctx->sc.eng, &len);
@@ -774,8 +819,12 @@ void MacTLS_Close(MacTLS_Context *ctx)
 {
     if (ctx == NULL) return;
 
+    /* The TLS 1.3 handshake bypasses BearSSL's T0 engine. Until fallback
+     * resets that engine, br_ssl_engine_close() can call an uninitialized
+     * runner (OS 9 Type 3). Abort the transport directly in that phase;
+     * application keys/close_notify are only available once connected. */
     if (ctx->state == kMacTLS_Connected ||
-        ctx->state == kMacTLS_Handshaking) {
+        (ctx->state == kMacTLS_Handshaking && !ctx->tls13_started)) {
 
         if (ctx->tls13_active) {
             /*
@@ -793,7 +842,8 @@ void MacTLS_Close(MacTLS_Context *ctx)
             alert[0] = 1;  /* warning level */
             alert[1] = 0;  /* close_notify */
 
-            if (tls13_record_encrypt(&ctx->hs13.write_ctx,
+            if (ctx->tls13_send_offset == ctx->tls13_send_len &&
+                tls13_record_encrypt(&ctx->hs13.write_ctx,
                                      alert, 2,
                                      TLS13_CT_ALERT,
                                      ciphertext, &ct_len) == 0) {
@@ -854,58 +904,26 @@ int MacTLS_Write(MacTLS_Context *ctx, const void *data, size_t len)
     if (ctx->state != kMacTLS_Connected) return -1;
 
     if (ctx->tls13_active) {
-        /*
-         * TLS 1.3 write path.
-         *
-         * Encrypt the plaintext into a TLS 1.3 record and send it
-         * directly via OT transport. We bypass BearSSL's sendapp
-         * buffer entirely.
-         *
-         * Max plaintext per record is 16384 (2^14). We cap at that.
-         */
-        unsigned char ciphertext[16384 + 1 + TLS13_TAG_SIZE];
-        unsigned char record_hdr[5];
         size_t ct_len;
-        int ret, sent, total;
-
+        int ret;
+        if (ctx->tls13_send_offset < ctx->tls13_send_len) return 0;
+        if (len == 0) return 0;
         if (len > 16384) len = 16384;
-
-        ret = tls13_record_encrypt(&ctx->hs13.write_ctx,
-                                   data, len,
-                                   TLS13_CT_APPLICATION_DATA,
-                                   ciphertext, &ct_len);
-        if (ret != 0) return -1;
-
-        /* Build the record header */
-        record_hdr[0] = TLS13_CT_APPLICATION_DATA;  /* 0x17 */
-        record_hdr[1] = 0x03;
-        record_hdr[2] = 0x03;
-        record_hdr[3] = (unsigned char)(ct_len >> 8);
-        record_hdr[4] = (unsigned char)(ct_len);
-
-        /* Send header */
-        sent = ot_transport_send(ctx->transport, record_hdr, 5);
-        if (sent < 0) return -1;
-        if (sent < 5) {
-            /*
-             * Partial header send — this shouldn't happen in practice
-             * since 5 bytes is tiny, but handle gracefully.
-             * For simplicity, report 0 bytes written (caller retries).
-             */
-            return 0;
+        ret = tls13_record_encrypt(&ctx->hs13.write_ctx, data, len,
+                TLS13_CT_APPLICATION_DATA, ctx->tls13_send_buf + 5, &ct_len);
+        if (ret != 0) {
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrWrite;
+            return -1;
         }
-
-        /* Send ciphertext */
-        total = 0;
-        while ((size_t)total < ct_len) {
-            sent = ot_transport_send(ctx->transport,
-                                     ciphertext + total,
-                                     ct_len - total);
-            if (sent < 0) return -1;
-            if (sent == 0) break;
-            total += sent;
-        }
-
+        ctx->tls13_send_buf[0] = TLS13_CT_APPLICATION_DATA;
+        ctx->tls13_send_buf[1] = 0x03;
+        ctx->tls13_send_buf[2] = 0x03;
+        ctx->tls13_send_buf[3] = (unsigned char)(ct_len >> 8);
+        ctx->tls13_send_buf[4] = (unsigned char)ct_len;
+        ctx->tls13_send_offset = 0;
+        ctx->tls13_send_len = 5 + ct_len;
+        /* Accepted into stable context storage; the pump sends it later. */
         return (int)len;
     }
 
