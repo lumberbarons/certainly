@@ -142,17 +142,31 @@ int tls13_record_decrypt(tls13_record_ctx *ctx,
     memcpy(dec_buf, ciphertext, ct_len);
 
     if (ctx->cipher_suite == TLS_CHACHA20_POLY1305_SHA256) {
+        /*
+         * br_poly1305_ctmul_run decrypts in place but does NOT verify
+         * the tag: it overwrites the tag buffer with the computed tag,
+         * and "the caller is responsible for checking that the computed
+         * tag matches the expected value" (bearssl_block.h). Keep the
+         * received tag and compare — otherwise any record would be
+         * accepted, and a wrong key would go unnoticed.
+         */
+        unsigned char received_tag[16];
+        memcpy(received_tag, dec_buf + payload_len, sizeof(received_tag));
+
         br_poly1305_ctmul_run(ctx->key, nonce,
                               dec_buf, payload_len,
                               aad, sizeof(aad),
-                              dec_buf + payload_len, /* tag */
+                              dec_buf + payload_len, /* computed tag */
                               br_chacha20_ct_run,
                               0 /* decrypt */);
-        /* Check tag — poly1305_run verifies in-place, returns via tag buffer.
-         * We need to check if decryption was authentic. BearSSL's poly1305
-         * function replaces the tag with the computed tag on decrypt.
-         * Compare computed tag with received tag. */
-        ok = 1; /* poly1305_run handles verification internally */
+        {
+            unsigned char diff = 0;
+            size_t i;
+            for (i = 0; i < sizeof(received_tag); i++) {
+                diff |= (unsigned char)(received_tag[i] ^ dec_buf[payload_len + i]);
+            }
+            ok = (diff == 0);
+        }
     } else {
         /* AES-GCM */
         br_aes_ct_ctr_keys aes_ctx;
