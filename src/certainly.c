@@ -463,7 +463,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         uint16_t record_len;
         uint8_t record_type;
         size_t total_record;
-        unsigned char decrypted[16384];
+        unsigned char decrypted[TLS13_DECRYPT_BUF_SIZE];
         size_t dec_len;
         uint8_t inner_ct;
         int ret;
@@ -471,6 +471,14 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         record_type = ctx->tls13_recv_buf[0];
         record_len = (uint16_t)((ctx->tls13_recv_buf[3] << 8) |
                                  ctx->tls13_recv_buf[4]);
+
+        /* A record over the protocol limit can never be decrypted (and
+         * would not fit in recv_buf, stalling the connection). */
+        if (record_len > TLS13_MAX_CIPHERTEXT) {
+            ctx->state = kMacTLS_Error;
+            ctx->error = kMacTLS_ErrRead;
+            return;
+        }
 
         total_record = 5 + record_len;
         if (ctx->tls13_recv_len < total_record) {
@@ -513,7 +521,8 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         /* Decrypt the record */
         ret = tls13_record_decrypt(&ctx->hs13.read_ctx,
                                    ctx->tls13_recv_buf + 5, record_len,
-                                   decrypted, &dec_len, &inner_ct);
+                                   decrypted, sizeof(decrypted),
+                                   &dec_len, &inner_ct);
         if (ret != 0) {
             ctx->state = kMacTLS_Error;
             ctx->error = kMacTLS_ErrRead;

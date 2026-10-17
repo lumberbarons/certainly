@@ -1192,6 +1192,13 @@ static tls13_hs_result tls13_read_encrypted_hs(
         record_len = get_u16(recv_buf + 3);
         total = (size_t)5 + record_len;
 
+        /* Over-limit records can never be valid; fail now rather than
+         * waiting for bytes that will not fit in the receive buffer. */
+        if (record_len > TLS13_MAX_CIPHERTEXT) {
+            hs->error = BR_ERR_TOO_LARGE;
+            return kTLS13_Error;
+        }
+
         if (*recv_len < total) {
             return kTLS13_WantRead;
         }
@@ -1222,7 +1229,8 @@ static tls13_hs_result tls13_read_encrypted_hs(
             size_t pt_len = 0;
             ret = tls13_record_decrypt(&hs->read_ctx,
                                        recv_buf + 5, record_len,
-                                       hs->plain_buf, &pt_len, &inner_ct);
+                                       hs->plain_buf, sizeof(hs->plain_buf),
+                                       &pt_len, &inner_ct);
             if (ret != 0) {
                 hs->error = BR_ERR_BAD_MAC;
                 return kTLS13_Error;

@@ -15,3 +15,8 @@ tests/host/test_http
 vm/
 .claude/
 .anubis/
+tests/host/test_record
+tests/host/test_record_handshake
+tests/host/test_record_app
+tests/host/build/
+tests/host/*.dSYM

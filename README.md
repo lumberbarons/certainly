@@ -153,7 +153,10 @@ cd tests/host && make test
 
 Runs the TLS 1.3 key schedule tests against RFC 8448 vectors and the HTTP
 request/response unit tests on the developer machine — no emulator needed.
-Run these before committing any change to the key schedule or HTTP parser.
+It also exercises TLS 1.3 record decryption bounds through the handshake and
+application-data paths; `make asan` repeats those under AddressSanitizer.
+Run these before committing any change to the key schedule, record layer or
+HTTP parser.
 
 ---
 

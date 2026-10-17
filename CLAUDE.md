@@ -29,7 +29,9 @@ There are **two** build environments and they are not interchangeable:
 
 2. **Host build** — `tests/host/Makefile` compiles unit tests with the
    developer's native `cc`. Used for fast iteration on platform-independent
-   code (key schedule, HTTP parser).
+   code (key schedule, HTTP parser, record layer bounds). The record tests
+   also compile the real `src/certainly.c` pump against stub Mac headers in
+   `tests/host/stubs/`.
    ```sh
    cd tests/host && make test
    ```
@@ -86,7 +88,8 @@ explicitly rejected to keep the transcript hash logic simple.
 
 - **Host tests** (`tests/host/`) — must pass before any commit that
   touches the key schedule, HTTP parser, or any other portable code.
-  Run with `make test` from that directory.
+  Run with `make test` from that directory. Changes to record
+  decryption or the receive path should also pass `make asan`.
 - **Emulator smoke tests** — for changes to the OT transport, handshake
   driver, or example apps, build with Retro68 and exercise the resulting
   `.dsk` in SheepShaver or QEMU. The Postman example is the most
