@@ -104,7 +104,20 @@ static void hkdf_expand_label(
         br_hmac_init(&mc, &kc, 0);
         br_hmac_update(&mc, info, info_len);
         br_hmac_update(&mc, &one, 1);
-        br_hmac_out(&mc, out);
+        {
+            /*
+             * br_hmac_out always writes hash_len bytes, but callers can
+             * pass shorter outputs (IVs are 12 bytes while the hash is
+             * 32). Writing straight into `out` overran those buffers and
+             * spilled into neighbouring locals — ASan caught a 32-byte
+             * write into a 12-byte client_iv. Produce into a scratch
+             * buffer and copy only what was asked for.
+             */
+            unsigned char full[64];
+            br_hmac_out(&mc, full);
+            memcpy(out, full, out_len);
+            memset(full, 0, sizeof(full));
+        }
 
         /* If out_len < hash output, caller gets the first out_len bytes.
          * br_hmac_out always writes hash_len bytes, so we may produce
