@@ -75,6 +75,16 @@ every operation yields before the next one begins.
 After `kMacTLS_Connected`, `MacTLS_GetVersion` returns `kMacTLS_Version12` or
 `kMacTLS_Version13` so you can show users which protocol was negotiated.
 
+**Only `kMacTLS_Closed` means the peer finished.** It is reported solely for an
+authenticated `close_notify`. A connection that is cut off, reset, or ended by
+a fatal or forged alert arrives as `kMacTLS_Error` (`kMacTLS_ErrTruncated`,
+`kMacTLS_ErrPeerAlert`, or `kMacTLS_ErrRead`), because anyone on the network
+path can end a TCP stream early. Data received before the error was
+authenticated and has already been returned by `MacTLS_Read`; whether a
+truncated stream still counts as complete is up to the protocol on top (an
+HTTP response with a satisfied `Content-Length` does, a body that runs to
+end-of-connection does not). Postman applies exactly that rule.
+
 ---
 
 ## How it works
@@ -151,9 +161,13 @@ images in SheepShaver, QEMU, or a real PowerMac.
 cd tests/host && make test
 ```
 
-Runs the TLS 1.3 key schedule tests against RFC 8448 vectors and the HTTP
-request/response unit tests on the developer machine — no emulator needed.
-Run these before committing any change to the key schedule or HTTP parser.
+Runs the TLS 1.3 key schedule tests against RFC 8448 vectors, the HTTP
+request/response unit tests, and connection-closure tests that drive
+`src/certainly.c` against a scripted transport on the developer machine — no
+emulator needed. Run these before committing any change to the key schedule,
+HTTP parser, or pump/closure logic. The closure tests cover record handling
+and state reporting; Open Transport event timing and a live TLS 1.2 handshake
+still need an emulator or real hardware.
 
 ---
 

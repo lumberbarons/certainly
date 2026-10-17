@@ -335,7 +335,9 @@ int http_headers_is_chunked(const char *headers, size_t headers_len)
             const char *v = p + 18;
             while (v < line_end && (*v == ' ' || *v == '\t')) v++;
 
-            /* Compare the value case-insensitively to "chunked". */
+            /* Compare the value case-insensitively to "chunked". Anything
+             * after the token (other than trailing blanks) is a different
+             * coding, which would make the body framing unknowable. */
             if ((size_t)(line_end - v) >= 7) {
                 const char *want = "chunked";
                 int match = 1;
@@ -344,6 +346,9 @@ int http_headers_is_chunked(const char *headers, size_t headers_len)
                     char b = want[i];
                     if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
                     if (a != b) { match = 0; break; }
+                }
+                for (const char *t = v + 7; match && t < line_end; t++) {
+                    if (*t != ' ' && *t != '\t') match = 0;
                 }
                 if (match) return 1;
             }
@@ -367,60 +372,282 @@ static int hex_digit(char c)
 }
 
 /*
- * Decode an HTTP/1.1 chunked body into `out`. Returns the number of
- * decoded bytes, or -1 on malformed input or output overflow. Safe
- * to pass out == in for in-place decoding (output is always shorter).
+ * Consume one line terminator (CRLF, or a bare LF from sloppy servers).
+ * Returns 1 if consumed, 0 if the input ends before the terminator is
+ * complete (a lone trailing CR counts), -1 if the bytes there are not a
+ * terminator.
  */
-int http_decode_chunked(const char *in, size_t in_len,
-                        char *out, size_t out_cap)
+static int eat_eol(const char **p, const char *e)
+{
+    if (*p >= e) return 0;
+    if (**p == '\n') { (*p)++; return 1; }
+    if (**p != '\r') return -1;
+    if (*p + 1 >= e) return 0;
+    if ((*p)[1] != '\n') return -1;
+    *p += 2;
+    return 1;
+}
+
+/*
+ * Walk a chunked body (out == NULL: framing check only, nothing copied).
+ * A body only counts as Done once the zero-length
+ * chunk AND the blank line ending the trailer section were seen; running
+ * out of input anywhere before that is Incomplete, which is how a
+ * truncated transfer differs from a malformed one. On Incomplete,
+ * *written still holds the decoded bytes that did arrive, including a
+ * partially received chunk.
+ */
+HttpChunkState http_decode_chunked_ex(const char *in, size_t in_len,
+                                      char *out, size_t out_cap,
+                                      size_t *written_out,
+                                      size_t *consumed_out)
 {
     const char *p = in;
     const char *e = in + in_len;
     size_t written = 0;
+    HttpChunkState st = kHttpChunk_Incomplete;
 
-    while (p < e) {
-        /* Parse hex length. */
+    for (;;) {
         size_t chunk_len = 0;
         int any_digits = 0;
+        int r;
+
         while (p < e) {
             int d = hex_digit(*p);
             if (d < 0) break;
+            if (chunk_len > ((size_t)-1 >> 4)) { st = kHttpChunk_Malformed; goto done; }
             chunk_len = (chunk_len << 4) | (size_t)d;
             any_digits = 1;
             p++;
         }
-        if (!any_digits) return -1;
+        if (p >= e) break;                       /* length line unfinished */
+        if (!any_digits) { st = kHttpChunk_Malformed; goto done; }
 
         /* Skip optional chunk extension ("; foo=bar"). */
         while (p < e && *p != '\r' && *p != '\n') p++;
-
-        /* Consume CR, LF, or CRLF after the length line. */
-        if (p < e && *p == '\r') p++;
-        if (p < e && *p == '\n') p++;
-        else return -1;  /* malformed: expected LF after length */
+        r = eat_eol(&p, e);
+        if (r < 0) { st = kHttpChunk_Malformed; goto done; }
+        if (r == 0) break;
 
         if (chunk_len == 0) {
-            /* Terminator chunk. Optional trailers follow, then blank
-             * line. We don't parse trailers — just return. */
-            return (int)written;
+            /* Trailer section: header lines, then an empty line. */
+            for (;;) {
+                const char *line = p;
+                int blank;
+                while (p < e && *p != '\r' && *p != '\n') p++;
+                blank = (p == line);
+                r = eat_eol(&p, e);
+                if (r < 0) { st = kHttpChunk_Malformed; goto done; }
+                if (r == 0) goto done;           /* trailers cut short */
+                if (blank) { st = kHttpChunk_Done; goto done; }
+            }
         }
 
-        /* Check we have enough input bytes for the chunk data. */
-        if ((size_t)(e - p) < chunk_len) return -1;
+        {
+            size_t avail = (size_t)(e - p);
+            size_t take = avail < chunk_len ? avail : chunk_len;
 
-        /* Copy into output, bounds-checked. */
-        if (written + chunk_len > out_cap) return -1;
+            if (out != NULL) {
+                if (written + take > out_cap) { st = kHttpChunk_Overflow; goto done; }
+                /* memmove in case out == in (in-place). */
+                memmove(out + written, p, take);
+            }
+            written += take;
+            p += take;
+            if (take < chunk_len) break;         /* chunk data cut short */
+        }
 
-        /* memmove in case out == in (in-place). */
-        memmove(out + written, p, chunk_len);
-        written += chunk_len;
-        p += chunk_len;
-
-        /* Consume trailing CR, LF, or CRLF after chunk data. */
-        if (p < e && *p == '\r') p++;
-        if (p < e && *p == '\n') p++;
+        r = eat_eol(&p, e);
+        if (r < 0) { st = kHttpChunk_Malformed; goto done; }
+        if (r == 0) break;
     }
 
-    /* Reached end of input without seeing a terminator chunk. */
-    return -1;
+done:
+    if (written_out) *written_out = written;
+    if (consumed_out) *consumed_out = (size_t)(p - in);
+    return st;
+}
+
+/*
+ * Decode an HTTP/1.1 chunked body into `out`. Returns the number of
+ * decoded bytes, or -1 if the body is malformed, overflows `out`, or is
+ * not complete (see http_decode_chunked_ex to tell those apart). Safe to
+ * pass out == in for in-place decoding (output is always shorter).
+ */
+int http_decode_chunked(const char *in, size_t in_len,
+                        char *out, size_t out_cap)
+{
+    size_t written;
+    if (http_decode_chunked_ex(in, in_len, out, out_cap,
+                               &written, NULL) != kHttpChunk_Done)
+        return -1;
+    return (int)written;
+}
+
+/* Parse the three-digit status code of an HTTP status line, or -1. */
+static int status_code_of(const char *status_line, size_t status_len)
+{
+    size_t i = 0;
+    int code = 0;
+    while (i < status_len && status_line[i] != ' ') i++;
+    if (i >= status_len) return -1;
+    i++;
+    if (i + 3 > status_len) return -1;
+    for (int k = 0; k < 3; k++) {
+        char c = status_line[i + (size_t)k];
+        if (c < '0' || c > '9') return -1;
+        code = code * 10 + (c - '0');
+    }
+    if (i + 3 < status_len && status_line[i + 3] != ' ') return -1;
+    return code;
+}
+
+size_t http_final_response_offset(const char *raw, size_t raw_len)
+{
+    size_t off = 0;
+
+    for (;;) {
+        const char *status, *headers, *body;
+        size_t status_len, headers_len, body_len;
+        int code;
+
+        if (http_split_response(raw + off, raw_len - off,
+                                &status, &status_len,
+                                &headers, &headers_len,
+                                &body, &body_len) != 0)
+            return off;
+        code = status_code_of(status, status_len);
+        if (code < 100 || code > 199 || code == 101) return off;
+        off = (size_t)(body - raw);
+    }
+}
+
+/*
+ * Parse the Content-Length headers. Returns 1 and sets *len when exactly
+ * one distinct valid value is present, 0 if the header is absent, and -1
+ * if it is malformed or repeated with conflicting values (the message
+ * length is then ambiguous).
+ */
+static int content_length_of(const char *headers, size_t headers_len,
+                             size_t *len_out)
+{
+    const char *p = headers;
+    const char *e = headers + headers_len;
+    int found = 0;
+    size_t value = 0;
+
+    while (p < e) {
+        const char *line_end = p;
+        while (line_end < e && *line_end != '\r' && *line_end != '\n')
+            line_end++;
+
+        if (header_line_is(p, (size_t)(line_end - p), "Content-Length")) {
+            const char *v = p + 15;
+            size_t n = 0;
+            int digits = 0;
+
+            while (v < line_end && (*v == ' ' || *v == '\t')) v++;
+            while (v < line_end && *v >= '0' && *v <= '9') {
+                if (n > ((size_t)-1 - 9) / 10) return -1;
+                n = n * 10 + (size_t)(*v - '0');
+                digits = 1;
+                v++;
+            }
+            while (v < line_end && (*v == ' ' || *v == '\t')) v++;
+            if (!digits || v != line_end) return -1;
+            if (found && n != value) return -1;
+            found = 1;
+            value = n;
+        }
+
+        if (line_end < e && *line_end == '\r') line_end++;
+        if (line_end < e && *line_end == '\n') line_end++;
+        p = line_end;
+    }
+
+    if (found) *len_out = value;
+    return found;
+}
+
+static int has_header(const char *headers, size_t headers_len,
+                      const char *name)
+{
+    const char *p = headers;
+    const char *e = headers + headers_len;
+
+    while (p < e) {
+        const char *line_end = p;
+        while (line_end < e && *line_end != '\r' && *line_end != '\n')
+            line_end++;
+        if (header_line_is(p, (size_t)(line_end - p), name)) return 1;
+        if (line_end < e && *line_end == '\r') line_end++;
+        if (line_end < e && *line_end == '\n') line_end++;
+        p = line_end;
+    }
+    return 0;
+}
+
+HttpBodyState http_check_body_framing(const char *status_line, size_t status_len,
+                                      const char *headers, size_t headers_len,
+                                      const char *body, size_t body_len,
+                                      int is_head, size_t *body_used_out)
+{
+    size_t used = 0;
+    HttpBodyState st;
+    int code = status_code_of(status_line, status_len);
+    size_t clen = 0;
+    int cl;
+
+    if (code < 0) {
+        st = kHttpBody_Malformed;
+    } else if (is_head || code < 200 || code == 204 || code == 304) {
+        /* These messages never carry a body, whatever the headers say. */
+        st = kHttpBody_Complete;
+    } else if (has_header(headers, headers_len, "Transfer-Encoding")) {
+        /* Transfer-Encoding overrides Content-Length (RFC 9112 6.3). A
+         * coding list that does not end in bare "chunked" is delimited
+         * only by the connection closing. */
+        if (http_headers_is_chunked(headers, headers_len)) {
+            /* A NULL output walks the framing without copying. */
+            HttpChunkState cs = http_decode_chunked_ex(
+                body, body_len, NULL, 0, NULL, &used);
+            if (cs == kHttpChunk_Done) {
+                st = kHttpBody_Complete;
+            } else if (cs == kHttpChunk_Incomplete) {
+                st = kHttpBody_Incomplete;
+                used = body_len;
+            } else {
+                st = kHttpBody_Malformed;
+                used = 0;
+            }
+        } else {
+            st = kHttpBody_UntilClose;
+            used = body_len;
+        }
+    } else if ((cl = content_length_of(headers, headers_len, &clen)) < 0) {
+        st = kHttpBody_Malformed;
+    } else if (cl == 1) {
+        if (body_len >= clen) { st = kHttpBody_Complete; used = clen; }
+        else { st = kHttpBody_Incomplete; used = body_len; }
+    } else {
+        st = kHttpBody_UntilClose;
+        used = body_len;
+    }
+
+    if (body_used_out) *body_used_out = used;
+    return st;
+}
+
+HttpVerdict http_response_verdict(HttpBodyState framing, HttpEnd end)
+{
+    switch (framing) {
+    case kHttpBody_Complete:   return kHttpVerdict_Complete;
+    case kHttpBody_Incomplete: return kHttpVerdict_Incomplete;
+    case kHttpBody_UntilClose:
+        /* The close itself delimits the body, so only an authenticated
+         * close_notify proves nothing was cut off. */
+        return end == kHttpEnd_CloseNotify ? kHttpVerdict_Complete
+                                           : kHttpVerdict_Unverified;
+    default:                   return kHttpVerdict_Malformed;
+    }
 }

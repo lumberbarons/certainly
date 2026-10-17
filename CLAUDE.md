@@ -85,7 +85,9 @@ explicitly rejected to keep the transcript hash logic simple.
 ## Testing
 
 - **Host tests** (`tests/host/`) — must pass before any commit that
-  touches the key schedule, HTTP parser, or any other portable code.
+  touches the key schedule, HTTP parser, connection closure in
+  `src/certainly.c` (`test_closure` compiles it against fake Mac headers
+  in `tests/host/fake/`), or any other portable code.
   Run with `make test` from that directory.
 - **Emulator smoke tests** — for changes to the OT transport, handshake
   driver, or example apps, build with Retro68 and exercise the resulting

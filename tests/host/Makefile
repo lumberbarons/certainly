@@ -25,15 +25,16 @@ BEARSSL_OBJS = \
 
 .PHONY: all clean test
 
-all: test_keysched test_http
+all: test_keysched test_http test_closure
 
 test_keysched: test_keysched.c $(SRC)/tls13_keysched.c $(SRC)/tls13_keysched.h
 	$(CC) $(CFLAGS) -I$(BEARSSL_INC) -I$(BEARSSL_SRC) -I$(SRC) \
 		-o $@ test_keysched.c $(SRC)/tls13_keysched.c $(BEARSSL_OBJS)
 
-test: test_keysched test_http
+test: test_keysched test_http test_closure
 	./test_keysched
 	./test_http
+	./test_closure
 
 test_http: test_http.c ../../examples/postman/http.c \
            ../../examples/postman/http.h
@@ -43,5 +44,27 @@ test_http: test_http.c ../../examples/postman/http.c \
 test_http_run: test_http
 	./test_http
 
+# test_closure builds src/certainly.c against the fake Mac headers in fake/
+# and links the whole of BearSSL, compiled once into obj/.
+BEARSSL_ALL = $(wildcard $(BEARSSL_SRC)/*/*.c)
+BEARSSL_OBJ = $(patsubst $(BEARSSL_SRC)/%.c,obj/bearssl/%.o,$(BEARSSL_ALL))
+BEARSSL_LIB = obj/libbearssl.a
+CLOSURE_SRCS = $(SRC)/certainly.c $(SRC)/tls13_handshake.c \
+	$(SRC)/tls13_keysched.c $(SRC)/tls13_record.c $(SRC)/ca_roots.c
+
+obj/bearssl/%.o: $(BEARSSL_SRC)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -I$(BEARSSL_INC) -I$(BEARSSL_SRC) -c $< -o $@
+
+$(BEARSSL_LIB): $(BEARSSL_OBJ)
+	rm -f $@
+	@ar rcs $@ $(BEARSSL_OBJ)
+
+test_closure: test_closure.c fake/OpenTransport.h $(CLOSURE_SRCS) \
+              $(SRC)/certainly_internal.h $(BEARSSL_LIB)
+	$(CC) $(CFLAGS) -Ifake -I$(BEARSSL_INC) -I$(SRC) -I../../include \
+		-o $@ test_closure.c $(CLOSURE_SRCS) $(BEARSSL_LIB)
+
 clean:
+	rm -rf obj test_closure
 	rm -f test_keysched test_http

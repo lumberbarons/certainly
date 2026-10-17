@@ -268,18 +268,18 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
             /*
              * OT reports no more data. If the peer has closed,
              * we may still have pending data in tls13_recv_buf
-             * that needs to be processed. Don't return Closed
-             * immediately — fall through to handshake_step to
-             * drain the buffer. If there's no pending data AND
-             * no handshake work to do, the handshake code will
-             * report WantRead and we'll come back here next time
-             * with still no data — at which point we mark Closed.
+             * that needs to be processed, so fall through to
+             * handshake_step to drain the buffer. Once nothing is
+             * left, the peer went away before the handshake finished:
+             * that is a failure, never an orderly close, because no
+             * close_notify can have been authenticated yet.
              */
             if ((ctx->transport->ordRelReceived ||
                  ctx->transport->disconnectReceived) &&
                 ctx->tls13_recv_len == 0 &&
                 ctx->hs13.plain_offset >= ctx->hs13.plain_len) {
-                ctx->state = kMacTLS_Closed;
+                ctx->state = kMacTLS_Error;
+                ctx->error = kMacTLS_ErrTruncated;
                 return ctx->state;
             }
             if (!ctx->transport->ordRelReceived &&
@@ -419,9 +419,53 @@ static int tls13_flush_application(MacTLS_Context *ctx)
     return 0;
 }
 
+static bool transport_peer_gone(const MacTLS_Context *ctx)
+{
+    return ctx->transport->ordRelReceived ||
+           ctx->transport->disconnectReceived;
+}
+
+static void conn_fail(MacTLS_Context *ctx, MacTLS_Error err, int detail)
+{
+    ctx->state = kMacTLS_Error;
+    ctx->error = err;
+    if (detail != 0) ctx->hs13.error = detail;
+}
+
+/* TLS 1.3 alert descriptions (RFC 8446 section 6). */
+#define TLS13_ALERT_CLOSE_NOTIFY  0
+#define TLS13_ALERT_USER_CANCELED 90
+
+/*
+ * Interpret an authenticated alert. Returns true if the connection ended
+ * (state is now Closed or Error) and false if processing may continue.
+ *
+ * TLS 1.3 ignores the level byte: close_notify is the only alert that
+ * authenticates end-of-data, user_canceled is advisory, and every other
+ * alert is fatal. Only a close_notify may yield kMacTLS_Closed.
+ */
+static bool tls13_handle_alert(MacTLS_Context *ctx,
+                               const unsigned char *alert, size_t len)
+{
+    if (len != 2) {
+        conn_fail(ctx, kMacTLS_ErrRead, BR_ERR_BAD_LENGTH);
+        return true;
+    }
+    if (alert[1] == TLS13_ALERT_CLOSE_NOTIFY) {
+        ctx->state = kMacTLS_Closed;
+        return true;
+    }
+    if (alert[1] == TLS13_ALERT_USER_CANCELED) {
+        return false;
+    }
+    conn_fail(ctx, kMacTLS_ErrPeerAlert, BR_ERR_RECV_FATAL_ALERT + alert[1]);
+    return true;
+}
+
 static void tls13_recv_records(MacTLS_Context *ctx)
 {
     int n;
+    bool eof = false;
 
     /* Drain the previous record before decrypting more: otherwise a second
      * full record silently overflows the 16 KB application buffer. */
@@ -441,17 +485,16 @@ static void tls13_recv_records(MacTLS_Context *ctx)
             ctx->tls13_recv_len += n;
         } else if (n < 0) {
             /*
-             * Peer closed or error. Mark for closure AFTER processing
-             * any pending records below. Real errors (not peer close)
-             * still bail immediately.
+             * Peer closed or error. Real errors (not peer close) bail
+             * immediately; a peer close is only remembered so that records
+             * already buffered are still processed below, since one of
+             * them may be the close_notify.
              */
-            if (!ctx->transport->ordRelReceived &&
-                !ctx->transport->disconnectReceived) {
-                ctx->state = kMacTLS_Error;
-                ctx->error = kMacTLS_ErrRead;
+            if (!transport_peer_gone(ctx)) {
+                conn_fail(ctx, kMacTLS_ErrRead, 0);
                 return;
             }
-            /* Fall through to process any buffered records */
+            eof = true;
         }
     }
 
@@ -492,11 +535,13 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         }
 
         /*
-         * Alert records (type 21) — server is signaling something.
-         * For simplicity, treat any alert as connection close.
+         * Keys are installed, so every legitimate record is an outer
+         * application_data record. A plaintext alert is unauthenticated
+         * and anyone on the path can forge it; honoring it would let an
+         * attacker end the stream as if it had been closed cleanly.
          */
         if (record_type == TLS13_CT_ALERT) {
-            ctx->state = kMacTLS_Closed;
+            conn_fail(ctx, kMacTLS_ErrRead, BR_ERR_UNEXPECTED);
             return;
         }
 
@@ -573,11 +618,8 @@ static void tls13_recv_records(MacTLS_Context *ctx)
             /* kTLS13_OK means the message was handled (e.g., discarded) */
 
         } else if (inner_ct == TLS13_CT_ALERT) {
-            /*
-             * Decrypted alert — treat as connection close.
-             */
-            ctx->state = kMacTLS_Closed;
-            return;
+            /* Anything after a close_notify or fatal alert is discarded. */
+            if (tls13_handle_alert(ctx, decrypted, dec_len)) return;
 
         } else {
             /* Unexpected inner content type */
@@ -588,15 +630,53 @@ static void tls13_recv_records(MacTLS_Context *ctx)
     }
 
     /*
-     * After processing all buffered records: if the peer closed and
-     * there's no more data to read, mark as Closed. The app can still
-     * drain tls13_app_buf via MacTLS_Read in the Closed state.
+     * Every buffered record is consumed and the transport has nothing more
+     * to give, yet no close_notify arrived (it would have returned above).
+     * A leftover partial record can never complete either. The stream may
+     * have been cut anywhere, so this is not a clean end (RFC 8446 6.1).
      */
-    if ((ctx->transport->ordRelReceived ||
-         ctx->transport->disconnectReceived) &&
-        ctx->tls13_recv_len == 0) {
-        ctx->state = kMacTLS_Closed;
+    if (eof) {
+        conn_fail(ctx, kMacTLS_ErrTruncated, 0);
     }
+}
+
+/* Translate a closed BearSSL engine into the public state/error pair. */
+static void tls12_map_closed(MacTLS_Context *ctx)
+{
+    int err = br_ssl_engine_last_error(&ctx->sc.eng);
+
+    if (err == BR_ERR_OK) {
+        ctx->state = kMacTLS_Closed;
+    } else if (err == BR_ERR_IO) {
+        ctx->state = kMacTLS_Error;
+        ctx->error = kMacTLS_ErrTruncated;
+    } else if (err >= BR_ERR_RECV_FATAL_ALERT &&
+               err < BR_ERR_SEND_FATAL_ALERT) {
+        ctx->state = kMacTLS_Error;
+        ctx->error = kMacTLS_ErrPeerAlert;
+    } else if (err == BR_ERR_X509_NOT_TRUSTED ||
+               err == BR_ERR_X509_BAD_SERVER_NAME) {
+        ctx->state = kMacTLS_Error;
+        ctx->error = kMacTLS_ErrCertificate;
+    } else {
+        ctx->state = kMacTLS_Error;
+        ctx->error = kMacTLS_ErrHandshake;
+    }
+}
+
+/*
+ * The peer's side of the TCP connection is gone while the BearSSL engine
+ * still wanted to talk. Only a received close_notify makes that a clean
+ * end. The engine itself is left alone: closing it would send our own
+ * close_notify and look like an orderly shutdown.
+ */
+static void tls12_peer_gone(MacTLS_Context *ctx)
+{
+    if (ctx->sc.eng.shutdown_recv) {
+        ctx->state = kMacTLS_Closed;
+        return;
+    }
+    conn_fail(ctx, kMacTLS_ErrTruncated, BR_ERR_IO);
 }
 
 /*
@@ -633,23 +713,44 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
 
         if (tstate == kOTTransport_Error) {
             /*
-             * Transport has entered error state (e.g. server disconnected).
-             * If we already completed the TLS handshake and have received
-             * data in the TLS 1.3 buffers, treat it as a graceful close so
-             * the app can still read the response data.
+             * Transport has entered error state (the peer reset or dropped
+             * the connection). Records already buffered are authenticated,
+             * so let tls13_recv_records deliver them and decide how the
+             * stream ended: close_notify, fatal alert, or truncation. Its
+             * verdict, including a decryption failure, must not be
+             * overwritten here.
              */
             if (ctx->tls13_active && ctx->state == kMacTLS_Connected) {
-                /* Let tls13_recv_records process any remaining data. */
                 tls13_recv_records(ctx);
-                /* If there's still undrained app data, stay Connected. */
-                if (ctx->tls13_app_offset < ctx->tls13_app_len) {
-                    return ctx->state;
+                if (ctx->state == kMacTLS_Connected &&
+                    ctx->tls13_app_offset >= ctx->tls13_app_len) {
+                    /* Nothing was concluded from the buffered records. */
+                    conn_fail(ctx, kMacTLS_ErrTruncated, 0);
                 }
-                ctx->state = kMacTLS_Closed;
                 return ctx->state;
             }
-            ctx->state = kMacTLS_Error;
-            ctx->error = kMacTLS_ErrConnect;
+            /* Once TCP was up, a dropped connection is a cut-off stream
+             * (TLS 1.2 included: no close_notify can have been seen, or
+             * the engine would already be closed); before that it is a
+             * failure to connect. */
+            if (ctx->state == kMacTLS_Handshaking ||
+                ctx->state == kMacTLS_Connected) {
+                /* The engine may already hold the peer's last records:
+                 * let the application drain them and let a received
+                 * close_notify or alert decide the outcome. */
+                if (!ctx->tls13_started) {
+                    unsigned est = br_ssl_engine_current_state(&ctx->sc.eng);
+                    if (est == BR_SSL_CLOSED) {
+                        tls12_map_closed(ctx);
+                        return ctx->state;
+                    }
+                    if (est & BR_SSL_RECVAPP) return ctx->state;
+                }
+                conn_fail(ctx, kMacTLS_ErrTruncated, BR_ERR_IO);
+            } else {
+                ctx->state = kMacTLS_Error;
+                ctx->error = kMacTLS_ErrConnect;
+            }
             return ctx->state;
         }
 
@@ -733,17 +834,7 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
     st = br_ssl_engine_current_state(&ctx->sc.eng);
 
     if (st == BR_SSL_CLOSED) {
-        int err = br_ssl_engine_last_error(&ctx->sc.eng);
-        if (err == BR_ERR_OK) {
-            ctx->state = kMacTLS_Closed;
-        } else if (err == BR_ERR_X509_NOT_TRUSTED ||
-                   err == BR_ERR_X509_BAD_SERVER_NAME) {
-            ctx->state = kMacTLS_Error;
-            ctx->error = kMacTLS_ErrCertificate;
-        } else {
-            ctx->state = kMacTLS_Error;
-            ctx->error = kMacTLS_ErrHandshake;
-        }
+        tls12_map_closed(ctx);
         return ctx->state;
     }
 
@@ -757,14 +848,12 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
             } else if (n < 0) {
                 /*
                  * Send failed. If the peer already closed the connection
-                 * (orderly release or disconnect), this is expected —
-                 * e.g., server sent "Connection: close" and shut down.
-                 * Treat as closed, not as an error.
+                 * this is only benign when its close_notify was received:
+                 * the engine's reply to it has nowhere to go. Otherwise
+                 * the stream ended without authentication.
                  */
-                if (ctx->transport->ordRelReceived ||
-                    ctx->transport->disconnectReceived) {
-                    br_ssl_engine_close(&ctx->sc.eng);
-                    ctx->state = kMacTLS_Closed;
+                if (transport_peer_gone(ctx)) {
+                    tls12_peer_gone(ctx);
                     return ctx->state;
                 }
                 ctx->state = kMacTLS_Error;
@@ -787,11 +876,10 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
             if (n > 0) {
                 br_ssl_engine_recvrec_ack(&ctx->sc.eng, n);
             } else if (n < 0) {
-                /* Recv failed — if peer closed, treat as normal close */
-                if (ctx->transport->ordRelReceived ||
-                    ctx->transport->disconnectReceived) {
-                    br_ssl_engine_close(&ctx->sc.eng);
-                    ctx->state = kMacTLS_Closed;
+                /* No more bytes will arrive. A close_notify would already
+                 * have closed the engine, so this ends without one. */
+                if (transport_peer_gone(ctx)) {
+                    tls12_peer_gone(ctx);
                     return ctx->state;
                 }
                 ctx->state = kMacTLS_Error;

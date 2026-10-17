@@ -11,6 +11,8 @@ bearssl/build/
 tools/cacerts/
 tests/host/test_keysched
 tests/host/test_http
+tests/host/test_closure
+tests/host/obj/
 .DS_Store
 vm/
 .claude/
