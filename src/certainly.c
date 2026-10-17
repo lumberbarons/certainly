@@ -819,8 +819,12 @@ void MacTLS_Close(MacTLS_Context *ctx)
 {
     if (ctx == NULL) return;
 
+    /* The TLS 1.3 handshake bypasses BearSSL's T0 engine. Until fallback
+     * resets that engine, br_ssl_engine_close() can call an uninitialized
+     * runner (OS 9 Type 3). Abort the transport directly in that phase;
+     * application keys/close_notify are only available once connected. */
     if (ctx->state == kMacTLS_Connected ||
-        ctx->state == kMacTLS_Handshaking) {
+        (ctx->state == kMacTLS_Handshaking && !ctx->tls13_started)) {
 
         if (ctx->tls13_active) {
             /*
