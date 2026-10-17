@@ -35,6 +35,10 @@ typedef struct {
     unsigned char iv[12];      /* base IV */
     uint64_t      seq;         /* sequence number (starts at 0, increments) */
     uint16_t      cipher_suite; /* which cipher to use */
+    /* AES key expansion and GHASH key are constant until the next init.
+     * Reuse them across records; br_gcm_reset resets per-record state. */
+    br_aes_ct_ctr_keys aes;
+    br_gcm_context    gcm;
 } tls13_record_ctx;
 
 /* Initialize a record context with key, IV, and cipher suite */

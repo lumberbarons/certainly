@@ -71,6 +71,10 @@ void tls13_record_init(tls13_record_ctx *ctx,
     memcpy(ctx->iv, iv, 12);
     ctx->seq = 0;
     ctx->cipher_suite = cipher_suite;
+    if (cipher_suite != TLS_CHACHA20_POLY1305_SHA256) {
+        br_aes_ct_ctr_init(&ctx->aes, ctx->key, ctx->key_len);
+        br_gcm_init(&ctx->gcm, &ctx->aes.vtable, br_ghash_ctmul32);
+    }
 }
 
 int tls13_record_encrypt(tls13_record_ctx *ctx,
@@ -103,16 +107,15 @@ int tls13_record_encrypt(tls13_record_ctx *ctx,
                               1 /* encrypt */);
     } else {
         /* AES-GCM */
-        br_aes_ct_ctr_keys aes_ctx;
-        br_gcm_context gcm;
-
-        br_aes_ct_ctr_init(&aes_ctx, ctx->key, ctx->key_len);
-        br_gcm_init(&gcm, &aes_ctx.vtable, br_ghash_ctmul32);
-        br_gcm_reset(&gcm, nonce, 12);
-        br_gcm_aad_inject(&gcm, aad, sizeof(aad));
-        br_gcm_flip(&gcm);
-        br_gcm_run(&gcm, 1 /* encrypt */, out_buf, pt_len + 1);
-        br_gcm_get_tag(&gcm, out_buf + pt_len + 1);
+        /* Rebind after a context copy: GCM keeps a pointer to the AES
+         * schedule. Only nonce/counters/AAD change between records. */
+        br_gcm_context *gcm = &ctx->gcm;
+        gcm->bctx = &ctx->aes.vtable;
+        br_gcm_reset(gcm, nonce, 12);
+        br_gcm_aad_inject(gcm, aad, sizeof(aad));
+        br_gcm_flip(gcm);
+        br_gcm_run(gcm, 1 /* encrypt */, out_buf, pt_len + 1);
+        br_gcm_get_tag(gcm, out_buf + pt_len + 1);
     }
 
     *out_len = total_ct_len;
@@ -169,16 +172,15 @@ int tls13_record_decrypt(tls13_record_ctx *ctx,
         }
     } else {
         /* AES-GCM */
-        br_aes_ct_ctr_keys aes_ctx;
-        br_gcm_context gcm;
-
-        br_aes_ct_ctr_init(&aes_ctx, ctx->key, ctx->key_len);
-        br_gcm_init(&gcm, &aes_ctx.vtable, br_ghash_ctmul32);
-        br_gcm_reset(&gcm, nonce, 12);
-        br_gcm_aad_inject(&gcm, aad, sizeof(aad));
-        br_gcm_flip(&gcm);
-        br_gcm_run(&gcm, 0 /* decrypt */, dec_buf, payload_len);
-        ok = br_gcm_check_tag(&gcm, dec_buf + payload_len);
+        /* Rebind after a context copy: GCM keeps a pointer to the AES
+         * schedule. Only nonce/counters/AAD change between records. */
+        br_gcm_context *gcm = &ctx->gcm;
+        gcm->bctx = &ctx->aes.vtable;
+        br_gcm_reset(gcm, nonce, 12);
+        br_gcm_aad_inject(gcm, aad, sizeof(aad));
+        br_gcm_flip(gcm);
+        br_gcm_run(gcm, 0 /* decrypt */, dec_buf, payload_len);
+        ok = br_gcm_check_tag(gcm, dec_buf + payload_len);
     }
 
     if (!ok) return -1;
