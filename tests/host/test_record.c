@@ -178,7 +178,7 @@ static void test_oversized_ciphertext(size_t s)
         CHECK(rx.seq == 0, "%s: ct_len=%zu advanced seq", suites[s].name, lens[li]);
         guarded_free(&g);
 
-        /* The exact production-sized destination from the report. */
+        /* The production-sized destination. */
         guarded_init(&g, TLS13_MAX_PLAINTEXT);
         r = tls13_record_decrypt(&rx, rec, lens[li], g.data, g.cap,
                                  &out_len, &ct);

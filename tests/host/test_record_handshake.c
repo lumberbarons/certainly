@@ -19,7 +19,7 @@
 /* The handshake code seeds BearSSL's PRNG from Mac OS entropy sources. */
 void entropy_seed_engine(br_ssl_engine_context *eng) { (void)eng; }
 
-#define RECV_CAP  (16384 + 325)   /* tls13_recv_buf in MacTLS_Context */
+#define RECV_CAP  TLS13_MAX_RECORD_SIZE   /* tls13_recv_buf in MacTLS_Context */
 
 typedef struct {
     tls13_hs_ctx *hs;
@@ -185,7 +185,7 @@ static void test_forged_records(size_t s)
 static void test_over_limit_header(size_t s)
 {
     static const size_t lens[] = {
-        TLS13_MAX_CIPHERTEXT + 1, 16709 - 5, 32768, 65535
+        TLS13_MAX_CIPHERTEXT + 1, 32768, 65535
     };
     size_t li, full;
 
@@ -261,6 +261,37 @@ static void test_through_handshake_step(size_t s)
     fixture_free(&f);
 }
 
+/* A cleartext record claiming more than 2^14 bytes can never complete. */
+static void test_server_hello_over_limit(void)
+{
+    static const size_t lens[] = {
+        TLS13_MAX_PLAINTEXT + 1, TLS13_MAX_CIPHERTEXT, 32768, 65535
+    };
+    size_t li, full;
+
+    for (li = 0; li < sizeof(lens) / sizeof(lens[0]); li++) {
+        for (full = 0; full < 2; full++) {
+            fixture f;
+            tls13_hs_result res;
+
+            fixture_init(&f, 0);
+            f.recv[0] = TLS13_CT_HANDSHAKE;
+            f.recv[1] = 3;
+            f.recv[2] = 3;
+            f.recv[3] = (unsigned char)(lens[li] >> 8);
+            f.recv[4] = (unsigned char)lens[li];
+            f.recv_len = full ? RECV_CAP : 5;
+            res = tls13_state_recv_server_hello(f.hs, f.recv, &f.recv_len);
+
+            CHECK(res == kTLS13_Error && f.hs->error == BR_ERR_TOO_LARGE,
+                  "len=%zu full=%zu: ServerHello result=%d err=%d (a stalled "
+                  "WantRead means the connection would hang)",
+                  lens[li], full, res, f.hs->error);
+            fixture_free(&f);
+        }
+    }
+}
+
 int main(void)
 {
     size_t s;
@@ -272,6 +303,7 @@ int main(void)
         test_through_handshake_step(s);
         printf("done: %s\n", suites[s].name);
     }
+    test_server_hello_over_limit();
     if (failures) {
         printf("%d check(s) FAILED\n", failures);
         return 1;

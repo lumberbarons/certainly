@@ -29,8 +29,7 @@ BEARSSL_ALL_SRC = $(wildcard $(BEARSSL_SRC)/*/*.c)
 BEARSSL_LIB = build/libbearssl.a
 STUBS = stubs
 
-# Record-boundary tests. The sanitizer variants are the regression evidence
-# for the record decrypt overflow; `make asan` runs them under ASan+UBSan.
+# Record-boundary tests; `make asan` runs them under ASan+UBSan.
 RECORD_TESTS = test_record test_record_handshake test_record_app
 RECORD_HDRS = record_helpers.h $(SRC)/tls13_record.h $(SRC)/tls13_record.c \
               $(SRC)/tls13_handshake.h

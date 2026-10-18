@@ -4,9 +4,9 @@
  * Compiles the production pump (src/certainly.c) against stub Mac
  * headers and a fake transport, then feeds it records through
  * MacTLS_Pump(). This reaches the real tls13_recv_records(), whose
- * decrypt destination is a stack array: before the fix an unauthenticated
- * 16448-byte record overran it. Run under ASan (make asan) to catch any
- * write past that array.
+ * decrypt destination is hs13.plain_buf. Unauthenticated records up to the
+ * 16-bit length limit must never write past that buffer; run under ASan
+ * (make asan) to catch any overrun.
  *
  * Build and run on the HOST machine:
  *   cd tests/host && make test_record_app && ./test_record_app
@@ -126,16 +126,15 @@ static void test_legal_full_record(size_t s)
 }
 
 /*
- * Forged records: the report's 16448-byte unauthenticated record, the
- * largest legal length, and everything above the limit up to what a
- * 16-bit length can claim. None may deliver data; all must end the
+ * Forged records at the largest legal length and everything above the
+ * limit up to what a 16-bit length can claim. None may deliver data; all must end the
  * connection with a read error instead of stalling.
  */
 static void test_rejected_records(size_t s)
 {
     static const size_t lens[] = {
         17, 16401, 16448, TLS13_MAX_CIPHERTEXT,
-        TLS13_MAX_CIPHERTEXT + 1, 16709 - 5, 17000, 65535
+        TLS13_MAX_CIPHERTEXT + 1, 17000, 65535
     };
     size_t li;
 

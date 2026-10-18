@@ -1033,6 +1033,13 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
     record_len = get_u16(recv_buf + 3);
     total = (size_t)5 + record_len;
 
+    /* Cleartext records are capped at 2^14; a longer claim would never
+     * complete in the receive buffer and the connection would stall. */
+    if (record_len > TLS13_MAX_PLAINTEXT) {
+        hs->error = BR_ERR_TOO_LARGE;
+        return kTLS13_Error;
+    }
+
     /* Check we have the full record */
     if (*recv_len < total) {
         return kTLS13_WantRead;

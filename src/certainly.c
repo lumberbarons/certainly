@@ -463,7 +463,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         uint16_t record_len;
         uint8_t record_type;
         size_t total_record;
-        unsigned char decrypted[TLS13_DECRYPT_BUF_SIZE];
+        unsigned char *decrypted;
         size_t dec_len;
         uint8_t inner_ct;
         int ret;
@@ -518,10 +518,15 @@ static void tls13_recv_records(MacTLS_Context *ctx)
             return;
         }
 
+        /* The handshake is over, so its plaintext buffer doubles as the
+         * decrypt destination and keeps a 16 KB array off the small
+         * Mac OS 9 stack. */
+        decrypted = ctx->hs13.plain_buf;
+
         /* Decrypt the record */
         ret = tls13_record_decrypt(&ctx->hs13.read_ctx,
                                    ctx->tls13_recv_buf + 5, record_len,
-                                   decrypted, sizeof(decrypted),
+                                   decrypted, sizeof(ctx->hs13.plain_buf),
                                    &dec_len, &inner_ct);
         if (ret != 0) {
             ctx->state = kMacTLS_Error;

@@ -31,6 +31,12 @@
 #define TLS13_MAX_PLAINTEXT   16384
 #define TLS13_MAX_CIPHERTEXT  (TLS13_MAX_PLAINTEXT + 256)
 
+/* Record header: type (1), legacy version (2), length (2). */
+#define TLS13_RECORD_HEADER_SIZE  5
+
+/* Largest record on the wire; the receive buffers are sized from this. */
+#define TLS13_MAX_RECORD_SIZE  (TLS13_RECORD_HEADER_SIZE + TLS13_MAX_CIPHERTEXT)
+
 /*
  * Output capacity that tls13_record_decrypt() accepts for any legal
  * record: the largest encrypted payload less the tag, which is never
