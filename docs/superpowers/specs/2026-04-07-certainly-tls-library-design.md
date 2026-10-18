@@ -185,7 +185,7 @@ is generated, for both TLS 1.3 and TLS 1.2. The TLS 1.3 handshake
 additionally refuses to build a ClientHello unless the engine DRBG was
 seeded through that path.
 
-Timer values, tick counts, mouse position, OT timestamps, location
+Timer values, tick counts, mouse position, location
 settings and `MacTLS_AddEntropy()` input are collected into a pool that is
 mixed into the seed derivation as additional input only. They are never
 counted as entropy and cannot satisfy the requirement.

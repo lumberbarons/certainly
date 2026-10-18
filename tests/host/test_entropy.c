@@ -271,6 +271,7 @@ static tls13_hs_result first_step(tls13_hs_ctx *hs, br_ssl_engine_context *eng)
 
     tls13_handshake_init(hs);
     hs->eng = eng;
+    hs->rng_trusted = true;
     return tls13_handshake_step(hs, rbuf, &rlen, "example.com");
 }
 
@@ -305,6 +306,22 @@ static void test_tls13_requires_trusted_seed(void)
     new_engine(&sc, &xc);
     sc.eng.rng_init_done = 1;
     CHECK(first_step(&hs, &sc.eng) == kTLS13_Error);
+    CHECK(hs.error == BR_ERR_NO_RANDOM);
+    CHECK(all_zero(hs.ecdhe_secret, sizeof(hs.ecdhe_secret)));
+
+    /* Engine seeded, but not marked as seeded from the trusted source. */
+    reset(0);
+    fill_seed(seed, sizeof(seed), 7);
+    entropy_seed_trusted(seed, sizeof(seed));
+    new_engine(&sc, &xc);
+    CHECK(entropy_seed_engine(&sc.eng) == kEntropy_OK);
+    tls13_handshake_init(&hs);
+    hs.eng = &sc.eng;
+    {
+        size_t rlen = 0;
+        unsigned char rbuf[1];
+        CHECK(tls13_handshake_step(&hs, rbuf, &rlen, "example.com") == kTLS13_Error);
+    }
     CHECK(hs.error == BR_ERR_NO_RANDOM);
     CHECK(all_zero(hs.ecdhe_secret, sizeof(hs.ecdhe_secret)));
 
@@ -349,7 +366,24 @@ static void test_tls13_hrr_and_record_bounds(void)
         0x00, 0x2B, 0x00, 0x02, 0x03, 0x04,
         0x00, 0x2C, 0x00, 0x04, 0x00, 0x02, 'a', 'b'
     };
+    /* Same HRR, but asking for a group via key_share (2-byte selected_group). */
+    static const unsigned char hrr_group_rec[] = {
+        0x16, 0x03, 0x03, 0x00, 0x38,
+        0x02, 0x00, 0x00, 0x34,
+        0x03, 0x03,
+        0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+        0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+        0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+        0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+        0x00,
+        0x13, 0x03,
+        0x00,
+        0x00, 0x0C,
+        0x00, 0x2B, 0x00, 0x02, 0x03, 0x04,
+        0x00, 0x33, 0x00, 0x02, 0x00, 0x17
+    };
     unsigned char rbuf[128];
+    unsigned char ch1_ids[33 + 32];  /* random, then session_id length + id */
     size_t rlen;
 
     printf("TLS 1.3 HRR retries once and oversized records fail closed\n");
@@ -360,6 +394,7 @@ static void test_tls13_hrr_and_record_bounds(void)
     CHECK(entropy_seed_engine(&sc.eng) == kEntropy_OK);
     CHECK(first_step(&hs, &sc.eng) == kTLS13_WantWrite);
     CHECK(hs.state == kTLS13_RecvServerHello);
+    memcpy(ch1_ids, hs.msg_buf + 11, sizeof(ch1_ids));
 
     memcpy(rbuf, hrr_rec, sizeof(hrr_rec));
     rlen = sizeof(hrr_rec);
@@ -371,9 +406,23 @@ static void test_tls13_hrr_and_record_bounds(void)
     /* Send retry ClientHello, then ensure WantRead stays in RecvServerHello. */
     CHECK(tls13_handshake_step(&hs, rbuf, &rlen, "example.com") == kTLS13_WantWrite);
     CHECK(hs.state == kTLS13_RecvServerHello);
+    /* random + legacy_session_id (length byte included) repeat unchanged. */
+    CHECK(memcmp(ch1_ids, hs.msg_buf + 11, sizeof(ch1_ids)) == 0);
     CHECK(tls13_handshake_step(&hs, rbuf, &rlen, "example.com") == kTLS13_WantRead);
     CHECK(hs.state == kTLS13_RecvServerHello);
 
+    /* An HRR key_share names a group we cannot provide: clean failure. */
+    reset(0);
+    entropy_seed_trusted(seed, sizeof(seed));
+    new_engine(&sc, &xc);
+    CHECK(entropy_seed_engine(&sc.eng) == kEntropy_OK);
+    CHECK(first_step(&hs, &sc.eng) == kTLS13_WantWrite);
+    memcpy(rbuf, hrr_group_rec, sizeof(hrr_group_rec));
+    rlen = sizeof(hrr_group_rec);
+    CHECK(tls13_handshake_step(&hs, rbuf, &rlen, "example.com") == kTLS13_Error);
+    CHECK(hs.error == BR_ERR_BAD_PARAM);
+
+    CHECK(first_step(&hs, &sc.eng) == kTLS13_WantWrite);
     /* Oversized ServerHello record header (> 16384) is rejected immediately. */
     rbuf[0] = 0x16; rbuf[1] = 0x03; rbuf[2] = 0x03;
     rbuf[3] = 0x40; rbuf[4] = 0x01; /* 16385 */

@@ -133,6 +133,7 @@ static MacTLS_Error setup_bearssl(MacTLS_Context *ctx)
     ctx->hs13.x509_ctx = (const br_x509_class **)&ctx->xc.vtable;
     /* The TLS 1.3 handshake borrows BearSSL's engine only for its PRNG. */
     ctx->hs13.eng = &ctx->sc.eng;
+    ctx->hs13.rng_trusted = true;
 
     /*
      * NOTE: We deliberately do NOT call br_ssl_client_reset() here.
@@ -545,7 +546,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         ret = tls13_record_decrypt(&ctx->hs13.read_ctx,
                                    ctx->tls13_recv_buf + 5, record_len,
                                    decrypted, &dec_len, &inner_ct);
-        if (ret != 0 || dec_len > TLS13_MAX_PLAINTEXT_LEN) {
+        if (ret != 0) {
             ctx->state = kMacTLS_Error;
             ctx->error = kMacTLS_ErrRead;
             return;
@@ -799,7 +800,7 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
                 if (ctx->transport->ordRelReceived ||
                     ctx->transport->disconnectReceived) {
                     br_ssl_engine_close(&ctx->sc.eng);
-                    if (ctx->state == kMacTLS_Connected ||
+                    if (ctx->tls12_established ||
                         ctx->state == kMacTLS_Closing) {
                         ctx->state = kMacTLS_Closed;
                     } else {
@@ -832,7 +833,7 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
                 if (ctx->transport->ordRelReceived ||
                     ctx->transport->disconnectReceived) {
                     br_ssl_engine_close(&ctx->sc.eng);
-                    if (ctx->state == kMacTLS_Connected ||
+                    if (ctx->tls12_established ||
                         ctx->state == kMacTLS_Closing) {
                         ctx->state = kMacTLS_Closed;
                     } else {
@@ -853,6 +854,7 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
 
     if (st & (BR_SSL_SENDAPP | BR_SSL_RECVAPP)) {
         /* Application data channels are open — handshake is done */
+        ctx->tls12_established = true;
         ctx->state = kMacTLS_Connected;
     } else if (st & (BR_SSL_SENDREC | BR_SSL_RECVREC)) {
         /* Only record-level I/O — still handshaking */

@@ -290,7 +290,11 @@ static int tls13_build_client_hello(tls13_hs_ctx *hs,
 
     /* Random: 32 bytes of cryptographic randomness */
     if (pos + 32 > buf_size) return -1;
-    br_hmac_drbg_generate(rng, buf + pos, 32);
+    if (!hs->hrr_received) {
+        br_hmac_drbg_generate(rng, hs->client_random, 32);
+        br_hmac_drbg_generate(rng, hs->session_id, 32);
+    }
+    memcpy(buf + pos, hs->client_random, 32);
     pos += 32;
 
     /*
@@ -301,7 +305,7 @@ static int tls13_build_client_hello(tls13_hs_ctx *hs,
      */
     if (pos + 1 + 32 > buf_size) return -1;
     buf[pos++] = 32;  /* session_id length */
-    br_hmac_drbg_generate(rng, buf + pos, 32);
+    memcpy(buf + pos, hs->session_id, 32);
     pos += 32;
 
     /*
@@ -608,7 +612,8 @@ static int tls13_x25519_shared_secret(const unsigned char *private_key,
 
 /*
  * Determine the AEAD key length for a TLS 1.3 cipher suite.
- * AES-128-GCM uses 16-byte keys; AES-256-GCM and ChaCha20-Poly1305 use 32.
+ * AES-128-GCM uses 16-byte keys; ChaCha20-Poly1305 uses 32. Returns 0 for any
+ * suite we did not offer, which includes the SHA-384 suites.
  */
 static size_t tls13_key_len_for_suite(uint16_t suite)
 {
@@ -620,18 +625,6 @@ static size_t tls13_key_len_for_suite(uint16_t suite)
     default:
         return 0;
     }
-}
-
-/*
- * Get the hash class for a TLS 1.3 cipher suite.
- * AES-256-GCM-SHA384 uses SHA-384; everything else uses SHA-256.
- */
-static const br_hash_class *tls13_hash_for_suite(uint16_t suite)
-{
-    if (suite == TLS13_AES_256_GCM_SHA384) {
-        return &br_sha384_vtable;
-    }
-    return &br_sha256_vtable;
 }
 
 /*
@@ -782,7 +775,16 @@ static tls13_hs_result tls13_parse_server_hello(tls13_hs_ctx *hs,
              *   opaque key_exchange (key_exchange_length)
              *
              * For X25519, key_exchange is 32 bytes (the u-coordinate).
+             *
+             * In a HelloRetryRequest the extension is only the 2-byte
+             * selected_group. X25519 is the one group we offer, so the
+             * server can only be asking for a group we cannot provide
+             * (or repeating the one we already sent, which is illegal).
              */
+            if (is_hrr) {
+                hs->error = BR_ERR_BAD_PARAM;
+                return kTLS13_Error;
+            }
             if (ext_len < 4) {
                 hs->error = BR_ERR_BAD_PARAM;
                 return kTLS13_Error;
@@ -897,30 +899,6 @@ static tls13_hs_result tls13_parse_server_hello(tls13_hs_ctx *hs,
     if (!found_key_share) {
         hs->error = BR_ERR_BAD_PARAM;
         return kTLS13_Error;
-    }
-
-    /*
-     * Re-initialize key schedule if the negotiated hash differs from
-     * our default (SHA-256). This happens if the server chose
-     * TLS_AES_256_GCM_SHA384.
-     */
-    {
-        const br_hash_class *suite_hash = tls13_hash_for_suite(cipher_suite);
-        if (suite_hash != hs->transcript.hash) {
-            /*
-             * The server chose a cipher suite with a different hash.
-             * We need to re-hash the transcript from scratch with the
-             * new hash. For simplicity, since we only support SHA-256
-             * and SHA-384, and our default is SHA-256, this only happens
-             * for AES-256-GCM-SHA384.
-             *
-             * TODO: In a full implementation, we'd need to re-hash from
-             * the original ClientHello bytes. For now, treat this as an
-             * error since our preferred suites all use SHA-256.
-             */
-            hs->error = BR_ERR_BAD_CIPHER_SUITE;
-            return kTLS13_Error;
-        }
     }
 
     /*
@@ -1233,10 +1211,6 @@ static tls13_hs_result tls13_read_encrypted_hs(
                                        hs->plain_buf, &pt_len, &inner_ct);
             if (ret != 0) {
                 hs->error = BR_ERR_BAD_MAC;
-                return kTLS13_Error;
-            }
-            if (pt_len > TLS13_MAX_PLAINTEXT_LEN) {
-                hs->error = BR_ERR_TOO_LARGE;
                 return kTLS13_Error;
             }
             hs->plain_len = pt_len;
@@ -2200,7 +2174,7 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
      * go any further, and in particular to generate a private key,
      * otherwise.
      */
-    if (eng->rng_init_done != 2) {
+    if (!hs->rng_trusted || eng->rng_init_done != 2) {
         hs->error = BR_ERR_NO_RANDOM;
         return kTLS13_Error;
     }
@@ -2213,10 +2187,7 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
 
     /*
      * Initialize transcript hash.
-     * Default to SHA-256; will be confirmed when we receive ServerHello
-     * and learn the negotiated cipher suite. SHA-256 is used by
-     * TLS_CHACHA20_POLY1305_SHA256 and TLS_AES_128_GCM_SHA256 (our
-     * top two preferences), so this is almost always correct.
+     * Both TLS 1.3 suites we offer use SHA-256.
      */
     if (!hs->hrr_received) {
         tls13_transcript_init(&hs->transcript, &br_sha256_vtable);
@@ -2227,6 +2198,7 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
     if (!hs->hrr_received) {
         ret = tls13_generate_x25519_keypair(hs, &rng);
         if (ret != 0) {
+            secure_wipe(&rng, sizeof(rng));
             hs->error = BR_ERR_BAD_STATE;
             return kTLS13_Error;
         }
@@ -2234,13 +2206,14 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
 
     /* Build the ClientHello message */
     ret = tls13_build_client_hello(hs, hostname, &rng);
+
+    /* Wipe the standalone PRNG */
+    secure_wipe(&rng, sizeof(rng));
+
     if (ret != 0) {
         hs->error = BR_ERR_TOO_LARGE;
         return kTLS13_Error;
     }
-
-    /* Wipe the standalone PRNG */
-    memset(&rng, 0, sizeof(rng));
 
     return kTLS13_WantWrite;
 }

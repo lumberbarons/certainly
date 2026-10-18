@@ -21,6 +21,10 @@
 /*
  * Call after MacTLS_Init(). Returns NULL once MacTLS holds a trusted
  * seed, otherwise a short message suitable for a status line.
+ *
+ * On failure this calls MacTLS_Shutdown() so the consumed seed cannot be
+ * used, which also drops any entropy provider the app had registered.
+ * Apps that use a provider should not use this helper.
  */
 const char *SeedFromFile(void);
 

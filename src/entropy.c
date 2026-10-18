@@ -22,8 +22,9 @@ static int                   g_drbg_seeded;
 
 static entropy_provider_fn   g_provider;
 static void                 *g_provider_user;
-static uint8_t               g_last_provider_raw[ENTROPY_SEED_BYTES];
-static int                   g_has_last_provider_raw;
+/* Digest, not the bytes: enough to spot a repeat without keeping the seed. */
+static uint8_t               g_last_provider_digest[32];
+static int                   g_has_last_provider_digest;
 
 static void wipe(void *p, size_t len)
 {
@@ -42,6 +43,16 @@ static void pool_mix(const void *data, size_t len)
         g_pool[g_pool_offset] ^= src[i];
         g_pool_offset = (g_pool_offset + 1) % POOL_SIZE;
     }
+}
+
+static void digest_bytes(const void *data, size_t len, uint8_t out[32])
+{
+    br_sha256_context sc;
+
+    br_sha256_init(&sc);
+    br_sha256_update(&sc, data, len);
+    br_sha256_out(&sc, out);
+    wipe(&sc, sizeof(sc));
 }
 
 /* Rejects only the degenerate case of a constant buffer. */
@@ -71,8 +82,8 @@ void entropy_shutdown(void)
     g_drbg_seeded = 0;
     g_provider = NULL;
     g_provider_user = NULL;
-    wipe(g_last_provider_raw, sizeof(g_last_provider_raw));
-    g_has_last_provider_raw = 0;
+    wipe(g_last_provider_digest, sizeof(g_last_provider_digest));
+    g_has_last_provider_digest = 0;
 }
 
 void entropy_add(const void *data, size_t len)
@@ -82,8 +93,8 @@ void entropy_add(const void *data, size_t len)
 
 void entropy_set_provider(entropy_provider_fn fn, void *user)
 {
-    wipe(g_last_provider_raw, sizeof(g_last_provider_raw));
-    g_has_last_provider_raw = 0;
+    wipe(g_last_provider_digest, sizeof(g_last_provider_digest));
+    g_has_last_provider_digest = 0;
     g_provider = fn;
     g_provider_user = user;
 }
@@ -113,19 +124,23 @@ entropy_status entropy_get_trusted(void *out, size_t len)
 
     if (g_provider != NULL) {
         uint8_t raw[ENTROPY_SEED_BYTES];
+        uint8_t digest[32];
 
         if (!g_provider(g_provider_user, raw, sizeof(raw))) {
             wipe(raw, sizeof(raw));
             return kEntropy_Unavailable;
         }
+        digest_bytes(raw, sizeof(raw), digest);
         if (!bytes_usable(raw, sizeof(raw)) ||
-            (g_has_last_provider_raw &&
-             memcmp(raw, g_last_provider_raw, sizeof(raw)) == 0)) {
+            (g_has_last_provider_digest &&
+             memcmp(digest, g_last_provider_digest, sizeof(digest)) == 0)) {
             wipe(raw, sizeof(raw));
+            wipe(digest, sizeof(digest));
             return kEntropy_Rejected;
         }
-        memcpy(g_last_provider_raw, raw, sizeof(raw));
-        g_has_last_provider_raw = 1;
+        memcpy(g_last_provider_digest, digest, sizeof(digest));
+        g_has_last_provider_digest = 1;
+        wipe(digest, sizeof(digest));
 
         if (g_drbg_init) {
             br_hmac_drbg_update(&g_drbg, raw, sizeof(raw));
