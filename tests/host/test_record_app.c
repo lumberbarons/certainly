@@ -38,8 +38,24 @@ int ot_transport_recv(OTTransport *t, void *buf, size_t len)
 }
 
 void entropy_init(void) {}
+void entropy_shutdown(void) {}
 void entropy_add(const void *data, size_t len) { (void)data; (void)len; }
-void entropy_seed_engine(br_ssl_engine_context *eng) { (void)eng; }
+void entropy_set_provider(entropy_provider_fn fn, void *user) { (void)fn; (void)user; }
+entropy_status entropy_seed_trusted(const void *seed, size_t len)
+{
+    (void)seed; (void)len;
+    return kEntropy_OK;
+}
+entropy_status entropy_get_trusted(void *out, size_t len)
+{
+    (void)out; (void)len;
+    return kEntropy_OK;
+}
+entropy_status entropy_seed_engine(br_ssl_engine_context *eng)
+{
+    (void)eng;
+    return kEntropy_OK;
+}
 const br_x509_trust_anchor TAs[1];
 const size_t TAs_NUM = 0;
 

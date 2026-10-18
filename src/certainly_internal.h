@@ -92,6 +92,13 @@ struct MacTLS_Context {
     bool            tls13_active;
     /* True once TLS 1.3 handshake has started (ClientHello sent) */
     bool            tls13_started;
+
+    /*
+     * True once BearSSL has opened its application-data channels. ctx->state
+     * drops back to Handshaking whenever only record-level I/O is pending, so
+     * it cannot tell a mid-transfer peer close from a failed handshake.
+     */
+    bool            tls12_established;
 };
 
 struct MacTLS_Config {

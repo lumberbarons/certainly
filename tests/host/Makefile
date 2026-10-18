@@ -23,10 +23,12 @@ BEARSSL_OBJS = \
 	$(BEARSSL_SRC)/codec/enc32le.c \
 	$(BEARSSL_SRC)/codec/enc64be.c
 
-# Full BearSSL, built once into build/ for the record-boundary tests, which
-# link the real handshake and pump code (X25519, X.509, AEAD, DRBG, ...).
-BEARSSL_ALL_SRC = $(wildcard $(BEARSSL_SRC)/*/*.c)
-BEARSSL_LIB = build/libbearssl.a
+# Full host build of BearSSL, shared by the entropy and record-boundary
+# tests, which link the real handshake and pump code (X25519, X.509, AEAD,
+# DRBG, ...).
+BEARSSL_ALL = $(wildcard $(BEARSSL_SRC)/*/*.c) $(BEARSSL_SRC)/settings.c
+BEARSSL_HOST_OBJS = $(patsubst $(BEARSSL_SRC)/%.c,obj/%.o,$(BEARSSL_ALL))
+BEARSSL_LIB = libbearssl_host.a
 STUBS = stubs
 
 # Record-boundary tests; `make asan` runs them under ASan+UBSan.
@@ -37,26 +39,34 @@ SAN_FLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
 
 .PHONY: all clean test asan
 
-all: test_keysched test_http $(RECORD_TESTS)
+all: test_keysched test_http test_entropy $(RECORD_TESTS)
 
 test_keysched: test_keysched.c $(SRC)/tls13_keysched.c $(SRC)/tls13_keysched.h
 	$(CC) $(CFLAGS) -I$(BEARSSL_INC) -I$(BEARSSL_SRC) -I$(SRC) \
 		-o $@ test_keysched.c $(SRC)/tls13_keysched.c $(BEARSSL_OBJS)
 
-test: test_keysched test_http $(RECORD_TESTS)
+obj/%.o: $(BEARSSL_SRC)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -std=c99 -I$(BEARSSL_INC) -I$(BEARSSL_SRC) -c -o $@ $<
+
+$(BEARSSL_LIB): $(BEARSSL_HOST_OBJS)
+	rm -f $@
+	ar rcs $@ $^
+
+test_entropy: test_entropy.c $(SRC)/entropy.c $(SRC)/entropy.h \
+              $(SRC)/tls13_handshake.c $(SRC)/tls13_keysched.c \
+              $(SRC)/tls13_record.c $(BEARSSL_LIB)
+	$(CC) $(CFLAGS) -I$(BEARSSL_INC) -I$(BEARSSL_SRC) -I$(SRC) \
+		-o $@ test_entropy.c $(SRC)/entropy.c $(SRC)/tls13_handshake.c \
+		$(SRC)/tls13_keysched.c $(SRC)/tls13_record.c $(BEARSSL_LIB)
+
+test: test_keysched test_http test_entropy $(RECORD_TESTS)
 	./test_keysched
 	./test_http
+	./test_entropy
 	./test_record
 	./test_record_handshake
 	./test_record_app
-
-$(BEARSSL_LIB): $(BEARSSL_ALL_SRC) $(wildcard $(BEARSSL_INC)/*.h) $(BEARSSL_SRC)/inner.h
-	@mkdir -p build/obj
-	@for f in $(BEARSSL_ALL_SRC); do \
-		o=build/obj/$$(echo $$f | sed 's|.*/src/||; s|/|_|g; s|\.c$$|.o|'); \
-		$(CC) -O2 -w -I$(BEARSSL_INC) -I$(BEARSSL_SRC) -c $$f -o $$o || exit 1; \
-	done
-	ar rcs $@ build/obj/*.o
 
 test_record: test_record.c $(RECORD_HDRS) $(BEARSSL_LIB)
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) -I$(BEARSSL_INC) -I$(SRC) \
@@ -93,4 +103,4 @@ test_http_run: test_http
 	./test_http
 
 clean:
-	rm -rf test_keysched test_http $(RECORD_TESTS) build *.dSYM
+	rm -rf test_keysched test_http test_entropy $(RECORD_TESTS) $(BEARSSL_LIB) obj *.dSYM
