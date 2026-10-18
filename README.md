@@ -194,9 +194,11 @@ cd tests/host && make test
 
 Runs the TLS 1.3 key schedule tests against RFC 8448 vectors, the HTTP
 request/response unit tests, and the trusted-seed tests (substituted sources,
-no reliance on timers) on the developer machine — no emulator needed. Run
-these before committing any change to the key schedule, HTTP parser or
-entropy handling. The first run builds a host copy of BearSSL.
+no reliance on timers) on the developer machine — no emulator needed. It also
+exercises TLS 1.3 record decryption bounds through the handshake and
+application-data paths; `make asan` repeats those under AddressSanitizer. Run
+these before committing any change to the key schedule, record layer, HTTP
+parser or entropy handling. The first run builds a host copy of BearSSL.
 
 These do not exercise `src/entropy_mac.c`, Open Transport, or the Mac OS 9
 build; the seed-file helper in `examples/common` and the Create/Pump wiring

@@ -135,9 +135,10 @@ typedef struct {
      * CertificateVerify + Finished). We decrypt the full record into
      * this buffer, then consume handshake messages one at a time from
      * here, advancing plain_offset. When plain_offset == plain_len,
-     * we decrypt the next record.
+     * we decrypt the next record. Sized for the largest legal encrypted
+     * payload since decryption also stages the content type and padding.
      */
-    unsigned char       plain_buf[TLS13_MAX_CIPHERTEXT_LEN];
+    unsigned char       plain_buf[TLS13_DECRYPT_BUF_SIZE];
     size_t              plain_len;
     size_t              plain_offset;
 

@@ -24,9 +24,25 @@
 /* AEAD tag size (both AES-GCM and ChaCha20-Poly1305 use 16 bytes) */
 #define TLS13_TAG_SIZE  16
 
-/* RFC 8446 Section 5.2 record payload limits */
-#define TLS13_MAX_PLAINTEXT_LEN  16384
-#define TLS13_MAX_CIPHERTEXT_LEN (TLS13_MAX_PLAINTEXT_LEN + 256)
+/*
+ * RFC 8446 section 5.2 record limits. Content is capped at 2^14 bytes and
+ * the encrypted payload (content + type + padding + tag) at 2^14 + 256.
+ */
+#define TLS13_MAX_PLAINTEXT   16384
+#define TLS13_MAX_CIPHERTEXT  (TLS13_MAX_PLAINTEXT + 256)
+
+/* Record header: type (1), legacy version (2), length (2). */
+#define TLS13_RECORD_HEADER_SIZE  5
+
+/* Largest record on the wire; the receive buffers are sized from this. */
+#define TLS13_MAX_RECORD_SIZE  (TLS13_RECORD_HEADER_SIZE + TLS13_MAX_CIPHERTEXT)
+
+/*
+ * Output capacity that tls13_record_decrypt() accepts for any legal
+ * record: the largest encrypted payload less the tag, which is never
+ * written to the output buffer.
+ */
+#define TLS13_DECRYPT_BUF_SIZE  (TLS13_MAX_CIPHERTEXT - TLS13_TAG_SIZE)
 
 /*
  * Record encryption/decryption context.
@@ -73,15 +89,25 @@ int tls13_record_encrypt(tls13_record_ctx *ctx,
  *
  * ciphertext: the encrypted payload (after the 5-byte record header)
  * ct_len:     length of ciphertext (includes content type byte + tag)
- * out:        output buffer (must be at least ct_len)
+ * out:        scratch/output buffer; the decrypted content, optional
+ *             padding and content type byte are written here
+ * out_cap:    size of out in bytes; must be at least ct_len minus
+ *             TLS13_TAG_SIZE (TLS13_DECRYPT_BUF_SIZE covers any legal
+ *             record)
  * out_len:    receives the plaintext length (excluding content type)
  * out_ct:     receives the real content type (extracted from decrypted payload)
  *
- * Returns 0 on success, -1 on decryption failure (bad MAC).
+ * Records longer than TLS13_MAX_CIPHERTEXT, or that would not fit in
+ * out_cap, are rejected before anything is written to out. Records whose
+ * content exceeds TLS13_MAX_PLAINTEXT are rejected after authentication.
+ * On any failure out is zeroed over the bytes that were used, *out_len and
+ * *out_ct are untouched and the sequence number does not advance.
+ *
+ * Returns 0 on success, -1 on failure (bad length, bad MAC, bad padding).
  */
 int tls13_record_decrypt(tls13_record_ctx *ctx,
                          const void *ciphertext, size_t ct_len,
-                         void *out, size_t *out_len,
-                         uint8_t *out_ct);
+                         void *out, size_t out_cap,
+                         size_t *out_len, uint8_t *out_ct);
 
 #endif /* CERTAINLY_TLS13_RECORD_H */

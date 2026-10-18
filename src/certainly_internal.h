@@ -75,14 +75,16 @@ struct MacTLS_Context {
      *           TLS records are parsed and decrypted.
      * app_buf:  holds decrypted application data ready for MacTLS_Read().
      */
-    unsigned char   tls13_recv_buf[16384 + 325]; /* max TLS record + header */
+    unsigned char   tls13_recv_buf[TLS13_MAX_RECORD_SIZE];
     size_t          tls13_recv_len;               /* bytes currently in recv_buf */
-    unsigned char   tls13_app_buf[16384];         /* decrypted app data */
+    unsigned char   tls13_app_buf[TLS13_MAX_PLAINTEXT]; /* decrypted app data */
     size_t          tls13_app_len;                /* bytes in app_buf */
     size_t          tls13_app_offset;             /* read cursor in app_buf */
 
     /* One accepted application record, retained across partial OT writes. */
-    unsigned char   tls13_send_buf[5 + 16384 + 1 + TLS13_TAG_SIZE];
+    unsigned char   tls13_send_buf[TLS13_RECORD_HEADER_SIZE +
+                                           TLS13_MAX_PLAINTEXT + 1 +
+                                           TLS13_TAG_SIZE];
     size_t          tls13_send_len;
     size_t          tls13_send_offset;
 
