@@ -24,6 +24,10 @@
 /* AEAD tag size (both AES-GCM and ChaCha20-Poly1305 use 16 bytes) */
 #define TLS13_TAG_SIZE  16
 
+/* RFC 8446 Section 5.2 record payload limits */
+#define TLS13_MAX_PLAINTEXT_LEN  16384
+#define TLS13_MAX_CIPHERTEXT_LEN (TLS13_MAX_PLAINTEXT_LEN + 256)
+
 /*
  * Record encryption/decryption context.
  * One per direction (read and write), each with its own key, IV,

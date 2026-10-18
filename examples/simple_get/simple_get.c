@@ -25,6 +25,7 @@
 #include <stdbool.h>
 
 #include "certainly.h"
+#include "seed_file.h"
 
 /* ── Log file on extfs volume ── */
 static short  gLogRefNum = 0;
@@ -310,6 +311,7 @@ int main(void)
     EventRecord event;
     size_t      i;
     char        header[128];
+    const char *seedError;
 
     InitGraf(&qd.thePort);
     InitFonts();
@@ -320,6 +322,7 @@ int main(void)
     InitCursor();
 
     MacTLS_Init();
+    seedError = SeedFromFile();
     LogOpen();
 
     window = NewWindow(NULL, &windowRect,
@@ -333,8 +336,13 @@ int main(void)
     LogLine("=== Certainly multi-endpoint TLS test ===");
     LogLine(header);
 
-    for (i = 0; i < kNumHosts; i++) {
-        TestOne(window, (int)(i + 2), &kHosts[i]);
+    if (seedError != NULL) {
+        DrawStatusLine(window, 2, seedError);
+        LogLine(seedError);
+    } else {
+        for (i = 0; i < kNumHosts; i++) {
+            TestOne(window, (int)(i + 2), &kHosts[i]);
+        }
     }
 
     DrawStatusLine(window, (int)(kNumHosts + 3), "Done. Click to quit.");

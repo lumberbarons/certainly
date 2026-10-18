@@ -8,7 +8,6 @@
  */
 
 #include "tls13_handshake.h"
-#include "entropy.h"
 #include <string.h>
 
 /* ── Wire Format Helpers ── */
@@ -141,9 +140,10 @@ void tls13_handshake_init(tls13_hs_ctx *hs)
  * (with clamping applied by BearSSL internally), and the public key
  * is the X25519 public point (also 32 bytes).
  *
- * The PRNG is seeded from our entropy pool via a standalone
- * br_hmac_drbg_context — we can't use BearSSL's engine PRNG because
- * the engine hasn't started its own handshake.
+ * The PRNG is a standalone br_hmac_drbg_context seeded from the engine's
+ * DRBG, which the library seeds from the trusted entropy source — we
+ * can't use the engine PRNG directly because the engine hasn't started
+ * its own handshake.
  */
 static int tls13_generate_x25519_keypair(tls13_hs_ctx *hs,
                                          br_hmac_drbg_context *rng)
@@ -203,12 +203,12 @@ static const uint16_t tls12_cipher_suites[] = {
 
 /*
  * TLS 1.3 cipher suites. Listed in preference order.
- * ChaCha20 first for PPC performance.
+ * ChaCha20 first for PPC performance. Only SHA-256 suites are offered
+ * so the transcript hash does not need to be re-initialized on ServerHello.
  */
 static const uint16_t tls13_cipher_suites[] = {
     TLS13_CHACHA20_POLY1305_SHA256,  /* 0x1303 */
     TLS13_AES_128_GCM_SHA256,       /* 0x1301 */
-    TLS13_AES_256_GCM_SHA384,       /* 0x1302 */
 };
 
 /*
@@ -290,7 +290,11 @@ static int tls13_build_client_hello(tls13_hs_ctx *hs,
 
     /* Random: 32 bytes of cryptographic randomness */
     if (pos + 32 > buf_size) return -1;
-    br_hmac_drbg_generate(rng, buf + pos, 32);
+    if (!hs->hrr_received) {
+        br_hmac_drbg_generate(rng, hs->client_random, 32);
+        br_hmac_drbg_generate(rng, hs->session_id, 32);
+    }
+    memcpy(buf + pos, hs->client_random, 32);
     pos += 32;
 
     /*
@@ -301,7 +305,7 @@ static int tls13_build_client_hello(tls13_hs_ctx *hs,
      */
     if (pos + 1 + 32 > buf_size) return -1;
     buf[pos++] = 32;  /* session_id length */
-    br_hmac_drbg_generate(rng, buf + pos, 32);
+    memcpy(buf + pos, hs->session_id, 32);
     pos += 32;
 
     /*
@@ -608,31 +612,19 @@ static int tls13_x25519_shared_secret(const unsigned char *private_key,
 
 /*
  * Determine the AEAD key length for a TLS 1.3 cipher suite.
- * AES-128-GCM uses 16-byte keys; AES-256-GCM and ChaCha20-Poly1305 use 32.
+ * AES-128-GCM uses 16-byte keys; ChaCha20-Poly1305 uses 32. Returns 0 for any
+ * suite we did not offer, which includes the SHA-384 suites.
  */
 static size_t tls13_key_len_for_suite(uint16_t suite)
 {
     switch (suite) {
     case TLS13_AES_128_GCM_SHA256:
         return 16;
-    case TLS13_AES_256_GCM_SHA384:
     case TLS13_CHACHA20_POLY1305_SHA256:
         return 32;
     default:
         return 0;
     }
-}
-
-/*
- * Get the hash class for a TLS 1.3 cipher suite.
- * AES-256-GCM-SHA384 uses SHA-384; everything else uses SHA-256.
- */
-static const br_hash_class *tls13_hash_for_suite(uint16_t suite)
-{
-    if (suite == TLS13_AES_256_GCM_SHA384) {
-        return &br_sha384_vtable;
-    }
-    return &br_sha256_vtable;
 }
 
 /*
@@ -783,7 +775,16 @@ static tls13_hs_result tls13_parse_server_hello(tls13_hs_ctx *hs,
              *   opaque key_exchange (key_exchange_length)
              *
              * For X25519, key_exchange is 32 bytes (the u-coordinate).
+             *
+             * In a HelloRetryRequest the extension is only the 2-byte
+             * selected_group. X25519 is the one group we offer, so the
+             * server can only be asking for a group we cannot provide
+             * (or repeating the one we already sent, which is illegal).
              */
+            if (is_hrr) {
+                hs->error = BR_ERR_BAD_PARAM;
+                return kTLS13_Error;
+            }
             if (ext_len < 4) {
                 hs->error = BR_ERR_BAD_PARAM;
                 return kTLS13_Error;
@@ -887,8 +888,9 @@ static tls13_hs_result tls13_parse_server_hello(tls13_hs_ctx *hs,
         tls13_transcript_reset_for_hrr(&hs->transcript);
         tls13_transcript_update(&hs->transcript, msg, hs_msg_len + 4);
 
-        /* Signal caller to resend ClientHello */
-        return kTLS13_WantRead;  /* reused as "need to retry" signal */
+        /* Transition back to SendClientHello to send the retry ClientHello. */
+        hs->state = kTLS13_SendClientHello;
+        return kTLS13_OK;
     }
 
     /*
@@ -897,30 +899,6 @@ static tls13_hs_result tls13_parse_server_hello(tls13_hs_ctx *hs,
     if (!found_key_share) {
         hs->error = BR_ERR_BAD_PARAM;
         return kTLS13_Error;
-    }
-
-    /*
-     * Re-initialize key schedule if the negotiated hash differs from
-     * our default (SHA-256). This happens if the server chose
-     * TLS_AES_256_GCM_SHA384.
-     */
-    {
-        const br_hash_class *suite_hash = tls13_hash_for_suite(cipher_suite);
-        if (suite_hash != hs->transcript.hash) {
-            /*
-             * The server chose a cipher suite with a different hash.
-             * We need to re-hash the transcript from scratch with the
-             * new hash. For simplicity, since we only support SHA-256
-             * and SHA-384, and our default is SHA-256, this only happens
-             * for AES-256-GCM-SHA384.
-             *
-             * TODO: In a full implementation, we'd need to re-hash from
-             * the original ClientHello bytes. For now, treat this as an
-             * error since our preferred suites all use SHA-256.
-             */
-            hs->error = BR_ERR_BAD_CIPHER_SUITE;
-            return kTLS13_Error;
-        }
     }
 
     /*
@@ -1031,6 +1009,10 @@ static tls13_hs_result tls13_state_recv_server_hello(tls13_hs_ctx *hs,
 
     record_type = recv_buf[0];
     record_len = get_u16(recv_buf + 3);
+    if (record_len > TLS13_MAX_PLAINTEXT_LEN) {
+        hs->error = BR_ERR_TOO_LARGE;
+        return kTLS13_Error;
+    }
     total = (size_t)5 + record_len;
 
     /* Check we have the full record */
@@ -1190,6 +1172,10 @@ static tls13_hs_result tls13_read_encrypted_hs(
 
         record_type = recv_buf[0];
         record_len = get_u16(recv_buf + 3);
+        if (record_len > TLS13_MAX_CIPHERTEXT_LEN) {
+            hs->error = BR_ERR_TOO_LARGE;
+            return kTLS13_Error;
+        }
         total = (size_t)5 + record_len;
 
         if (*recv_len < total) {
@@ -2181,27 +2167,18 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
     /*
      * Initialize a standalone PRNG for key generation and random bytes.
      *
-     * We can't use BearSSL's engine PRNG because the engine hasn't
-     * started its own handshake (we're bypassing T0). Instead, we
-     * create our own HMAC_DRBG seeded from the entropy pool.
-     *
-     * We extract seed material by injecting entropy into the engine
-     * (which has already been done by certainly.c) and then using
-     * the engine's PRNG to generate our seed. If the engine's PRNG
-     * is available, use it; otherwise seed from the raw entropy pool.
+     * We can't use BearSSL's engine PRNG directly because the engine
+     * hasn't started its own handshake (we're bypassing T0), so we
+     * derive a seed from it. The engine PRNG is only trustworthy if
+     * certainly.c seeded it from the trusted entropy source; refuse to
+     * go any further, and in particular to generate a private key,
+     * otherwise.
      */
-    if (eng->rng_init_done) {
-        /* Engine PRNG is seeded — use it to seed our standalone PRNG */
-        br_hmac_drbg_generate(&eng->rng, seed, sizeof(seed));
-    } else {
-        /*
-         * Engine PRNG not ready — seed the engine first, then use it.
-         * entropy_seed_engine() injects pool data into the engine's
-         * HMAC_DRBG.
-         */
-        entropy_seed_engine(eng);
-        br_hmac_drbg_generate(&eng->rng, seed, sizeof(seed));
+    if (!hs->rng_trusted || eng->rng_init_done != 2) {
+        hs->error = BR_ERR_NO_RANDOM;
+        return kTLS13_Error;
     }
+    br_hmac_drbg_generate(&eng->rng, seed, sizeof(seed));
 
     br_hmac_drbg_init(&rng, &br_sha256_vtable, seed, sizeof(seed));
 
@@ -2210,10 +2187,7 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
 
     /*
      * Initialize transcript hash.
-     * Default to SHA-256; will be confirmed when we receive ServerHello
-     * and learn the negotiated cipher suite. SHA-256 is used by
-     * TLS_CHACHA20_POLY1305_SHA256 and TLS_AES_128_GCM_SHA256 (our
-     * top two preferences), so this is almost always correct.
+     * Both TLS 1.3 suites we offer use SHA-256.
      */
     if (!hs->hrr_received) {
         tls13_transcript_init(&hs->transcript, &br_sha256_vtable);
@@ -2224,6 +2198,7 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
     if (!hs->hrr_received) {
         ret = tls13_generate_x25519_keypair(hs, &rng);
         if (ret != 0) {
+            secure_wipe(&rng, sizeof(rng));
             hs->error = BR_ERR_BAD_STATE;
             return kTLS13_Error;
         }
@@ -2231,13 +2206,14 @@ static tls13_hs_result tls13_state_send_client_hello(tls13_hs_ctx *hs,
 
     /* Build the ClientHello message */
     ret = tls13_build_client_hello(hs, hostname, &rng);
+
+    /* Wipe the standalone PRNG */
+    secure_wipe(&rng, sizeof(rng));
+
     if (ret != 0) {
         hs->error = BR_ERR_TOO_LARGE;
         return kTLS13_Error;
     }
-
-    /* Wipe the standalone PRNG */
-    memset(&rng, 0, sizeof(rng));
 
     return kTLS13_WantWrite;
 }
@@ -2298,18 +2274,9 @@ tls13_hs_result tls13_handshake_step(tls13_hs_ctx *hs,
 
     case kTLS13_RecvServerHello: {
         tls13_hs_result r = tls13_state_recv_server_hello(hs, recv_buf, recv_len);
-        if (r == kTLS13_OK) {
+        if (r == kTLS13_OK && hs->state == kTLS13_RecvServerHello) {
             /* TLS 1.3 ServerHello processed — advance to encrypted phase */
             hs->state = kTLS13_RecvEncryptedExtensions;
-            return kTLS13_OK;
-        }
-        if (r == kTLS13_WantRead && hs->hrr_received) {
-            /*
-             * HelloRetryRequest received — go back to send a new
-             * ClientHello with the cookie and possibly a new key share.
-             */
-            hs->state = kTLS13_SendClientHello;
-            return kTLS13_OK;
         }
         return r;
     }

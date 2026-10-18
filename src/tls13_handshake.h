@@ -30,7 +30,6 @@
 
 /* TLS 1.3 cipher suite IDs */
 #define TLS13_AES_128_GCM_SHA256       0x1301
-#define TLS13_AES_256_GCM_SHA384       0x1302
 #define TLS13_CHACHA20_POLY1305_SHA256 0x1303
 
 /* Extension types */
@@ -138,9 +137,13 @@ typedef struct {
      * here, advancing plain_offset. When plain_offset == plain_len,
      * we decrypt the next record.
      */
-    unsigned char       plain_buf[16384];
+    unsigned char       plain_buf[TLS13_MAX_CIPHERTEXT_LEN];
     size_t              plain_len;
     size_t              plain_offset;
+
+    /* Kept so a post-HRR ClientHello repeats them unchanged (RFC 8446 4.1.2) */
+    unsigned char       client_random[32];
+    unsigned char       session_id[32];
 
     /* HRR cookie */
     unsigned char       cookie[256];
@@ -164,6 +167,13 @@ typedef struct {
      * if the caller arranges RNG seeding some other way.
      */
     br_ssl_engine_context *eng;
+
+    /*
+     * Set by the caller once eng's DRBG was seeded from the trusted
+     * entropy source. Required in addition to the engine's own seeded
+     * marker, which any injected bytes would also satisfy.
+     */
+    bool                rng_trusted;
 
     /* Server's public key (from certificate, for CertificateVerify) */
     br_x509_pkey        server_pkey;
