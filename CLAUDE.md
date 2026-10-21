@@ -106,3 +106,14 @@ explicitly rejected to keep the transcript hash logic simple.
   tested independently of Mac OS.
 - Do not commit `build/`, `.dsk` outputs, or generated trust anchor
   files.
+
+## Architectural Decisions
+
+ADRs live in `docs/adr/`. Read relevant ADRs before proposing architectural
+changes: accepted ADRs record constraints and rejected alternatives; proposed
+ADRs await review and do not establish policy. Specs should cite the decisions
+that constrain them; ADRs do not track their downstream consumers.
+
+| ADR | When this applies |
+|---|---|
+| [ADR-0001](docs/adr/0001-test-shared-tls-code-natively-with-tls-anvil.md) (proposed) | Changes to conformance testing, the host/target platform boundary, shared TLS or pump code, test validation, or interpretation of suite results. |
