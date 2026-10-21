@@ -44,7 +44,11 @@ See [LICENSE](LICENSE) for the full MIT terms.
 #include <certainly.h>
 
 MacTLS_Init();
+MacTLS_SeedTrusted(seed, sizeof(seed));   /* required — see "Entropy" below */
 MacTLS_Context *ctx = MacTLS_Create("api.example.com", 443);
+if (ctx == NULL || MacTLS_GetState(ctx) == kMacTLS_Error) {
+    /* MacTLS_GetError() == kMacTLS_ErrEntropy means no trusted seed */
+}
 
 while (running) {
     EventRecord ev;
@@ -74,6 +78,43 @@ every operation yields before the next one begins.
 
 After `kMacTLS_Connected`, `MacTLS_GetVersion` returns `kMacTLS_Version12` or
 `kMacTLS_Version13` so you can show users which protocol was negotiated.
+
+---
+
+## Entropy
+
+Mac OS 9 has no cryptographic random number generator, and the library has
+no way to tell whether timer values, mouse position or location settings are
+unpredictable. Certainly therefore does not generate TLS key material from
+them. Before a connection can be created, **the application must supply a
+trusted seed**: bytes it vouches are unpredictable to an attacker.
+
+- `MacTLS_SeedTrusted(seed, len)` — hand over at least `kMacTLS_MinSeedBytes`
+  bytes (a seed whose bytes are all identical is rejected as an obvious
+  mistake; that is not a quality check).
+- `MacTLS_SetEntropyProvider(fn, userData)` — or register a callback, e.g.
+  over a hardware RNG, that is asked for fresh bytes on every connection.
+- `MacTLS_ExportSeed(out, len)` — draw bytes to write back a replacement
+  seed file, so a seed is never used for two runs.
+
+Without a trusted source, `MacTLS_Create` returns a context in
+`kMacTLS_Error` state with error `kMacTLS_ErrEntropy`, before any TCP
+connection is opened or key is generated. This applies to TLS 1.3 and TLS 1.2
+alike. Timer jitter, tick counts, mouse position, location settings and
+`MacTLS_AddEntropy()` data are still stirred in, but only as supplemental
+input; they never satisfy the requirement.
+
+The library cannot verify a seed. A predictable seed gives predictable keys,
+and a seed file is only as good as the machine that made it and the secrecy
+of the file. The example apps read a file named `Certainly Seed` from the
+application folder and replace it with fresh output as soon as it is read:
+
+```sh
+tools/make_seed.sh            # writes "Certainly Seed" from the host's RNG
+```
+
+Copy it next to the app (use a new file for every copy of the app folder; a
+duplicated seed means duplicated keys).
 
 ---
 
@@ -151,9 +192,18 @@ images in SheepShaver, QEMU, or a real PowerMac.
 cd tests/host && make test
 ```
 
-Runs the TLS 1.3 key schedule tests against RFC 8448 vectors and the HTTP
-request/response unit tests on the developer machine — no emulator needed.
-Run these before committing any change to the key schedule or HTTP parser.
+Runs the TLS 1.3 key schedule tests against RFC 8448 vectors, the HTTP
+request/response unit tests, and the trusted-seed tests (substituted sources,
+no reliance on timers) on the developer machine — no emulator needed. It also
+exercises TLS 1.3 record decryption bounds through the handshake and
+application-data paths; `make asan` repeats those under AddressSanitizer. Run
+these before committing any change to the key schedule, record layer, HTTP
+parser or entropy handling. The first run builds a host copy of BearSSL.
+
+These do not exercise `src/entropy_mac.c`, Open Transport, or the Mac OS 9
+build; the seed-file helper in `examples/common` and the Create/Pump wiring
+have only been checked by reading, not by a Retro68 build or an emulator or
+hardware run. Validate those on the target before relying on them.
 
 ---
 
@@ -177,14 +227,16 @@ src/
   tls13_keysched.c         TLS 1.3 HKDF key schedule
   tls13_record.c           TLS 1.3 record layer (AEAD)
   ca_roots.c               Mozilla trust anchors (generated — do not edit)
-  entropy.c                Entropy collection for PRNG seeding
+  entropy.c                Trusted-seed handling for PRNG seeding
+  entropy_mac.c            Supplemental (non-trusted) Mac OS inputs
 bearssl/                   Vendored BearSSL
 examples/
+  common/                  Seed-file helper shared by the examples
   simple_get/              HTTPS GET sweep across many endpoints
   postman/                 Interactive HTTPS request builder (UI app)
 tests/host/                Host-side unit tests (native cc, not Retro68)
 docs/                      Design notes and emulator setup
-tools/                     CA bundle regeneration script
+tools/                     CA bundle regeneration, seed file generator
 ```
 
 ---

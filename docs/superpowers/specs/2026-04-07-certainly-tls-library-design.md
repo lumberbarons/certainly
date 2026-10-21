@@ -53,7 +53,7 @@ Building Mac OS 9 clients for modern services: Audiobookshelf, OpenAI-compatible
 | Library type | Static (.a) | Primary use case is author's own apps. Simpler distribution, no versioning issues. API is clean enough to wrap as CFM shared lib later if desired. |
 | API model | Poll-based (Pump) | Simpler than callbacks in C. Natural fit for the classic Mac event loop — call MacTLS_Pump alongside WaitNextEvent. |
 | CA storage | Compiled-in C arrays | No file I/O dependencies, no resource fork, ~15KB for 8-10 root CAs. BearSSL's brssl tool generates the C source. |
-| Entropy | Multi-source XOR into HMAC_DRBG | Best available without hardware RNG. Adequate for REST API client threat model. |
+| Entropy | Application-supplied trusted seed into HMAC_DRBG; OS-derived values supplemental only | Mac OS 9 offers no verifiable entropy source, so the library fails closed without one. |
 | TLS 1.3 | Phase 2 stretch goal | Extend BearSSL's state machine after TLS 1.2 is proven. BearSSL's architecture (modular crypto, state machine handshake) is the best base for this work. |
 
 ### BearSSL State Machine Model
@@ -163,30 +163,35 @@ MacTLS_Error   MacTLS_ConfigAddCA(MacTLS_Config *cfg,
 ### Entropy
 
 ```c
-void MacTLS_AddEntropy(const void *data, size_t len);
+MacTLS_Error MacTLS_SeedTrusted(const void *seed, size_t len);
+void         MacTLS_SetEntropyProvider(MacTLS_EntropyProvider fn, void *userData);
+MacTLS_Error MacTLS_ExportSeed(void *out, size_t len);
+void         MacTLS_AddEntropy(const void *data, size_t len);
 ```
 
 ## Entropy Strategy
 
-### Sources
+> Revised: the original design injected an XOR pool of timer, mouse and
+> settings values into BearSSL and called that adequate. BearSSL treats any
+> injected bytes as sufficient, and none of those values carries a
+> measurable entropy guarantee, so it is no longer used to satisfy the
+> requirement. See README "Entropy" and `include/certainly.h`.
 
-| Source | API | Quality | When |
-|---|---|---|---|
-| Microsecond counter | `Microseconds()` | Low | Init + per-connection |
-| Tick counter | `TickCount()` | Low | Init + per-connection |
-| Mouse position | `GetMouse()` | Medium | Init + per-connection |
-| Low-memory ticks | `LMGetTicks()` | Low | Init |
-| OT timestamp | `OTGetTimeStamp()` | Medium | Per-connection |
-| Geographic settings | `ReadLocation()` | One-time salt | Init |
-| Stack junk | Uninitialized local | Unpredictable | Init |
+Mac OS 9 has no cryptographic RNG. Connection setup therefore requires a
+trusted seed supplied by the application (`MacTLS_SeedTrusted` or a
+provider callback). Without one, `MacTLS_Create*` yields a context in
+`kMacTLS_Error` with `kMacTLS_ErrEntropy` before a socket is opened or a key
+is generated, for both TLS 1.3 and TLS 1.2. The TLS 1.3 handshake
+additionally refuses to build a ClientHello unless the engine DRBG was
+seeded through that path.
 
-### Mixing
+Timer values, tick counts, mouse position, location
+settings and `MacTLS_AddEntropy()` input are collected into a pool that is
+mixed into the seed derivation as additional input only. They are never
+counted as entropy and cannot satisfy the requirement.
 
-All sources are XOR-mixed into a 256-byte pool, then injected into BearSSL's HMAC_DRBG via `br_ssl_engine_inject_entropy()`. The DRBG is reseeded before each new TLS handshake. Applications can contribute additional entropy via `MacTLS_AddEntropy()`.
-
-### Threat Model
-
-This entropy is adequate for a REST API client where the attacker is remote. It would not withstand a local attacker with precise timing knowledge. This is explicitly documented and acceptable for the target use case.
+The library cannot verify a seed; an application that supplies a
+predictable one gets predictable keys.
 
 ## Certificate Trust Store
 

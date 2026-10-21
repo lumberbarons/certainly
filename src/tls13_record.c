@@ -19,7 +19,6 @@
 
 /* TLS 1.3 cipher suite IDs */
 #define TLS_AES_128_GCM_SHA256       0x1301
-#define TLS_AES_256_GCM_SHA384       0x1302
 #define TLS_CHACHA20_POLY1305_SHA256 0x1303
 
 /*
@@ -125,51 +124,59 @@ int tls13_record_encrypt(tls13_record_ctx *ctx,
 
 int tls13_record_decrypt(tls13_record_ctx *ctx,
                          const void *ciphertext, size_t ct_len,
-                         void *out, size_t *out_len,
-                         uint8_t *out_ct)
+                         void *out, size_t out_cap,
+                         size_t *out_len, uint8_t *out_ct)
 {
     unsigned char nonce[12];
     unsigned char aad[5];
     unsigned char *dec_buf = (unsigned char *)out;
+    const unsigned char *received_tag;
     size_t payload_len;
+    size_t content_len;
     int ok;
 
+    /* The length is peer-controlled: validate it against the protocol
+     * limit and the destination before any byte is written to out. */
+    if (ciphertext == NULL || out == NULL ||
+        out_len == NULL || out_ct == NULL) return -1;
     if (ct_len < 1 + TLS13_TAG_SIZE) return -1;
+    if (ct_len > TLS13_MAX_CIPHERTEXT) return -1;
 
     payload_len = ct_len - TLS13_TAG_SIZE;
+    if (payload_len > out_cap) return -1;
+
+    received_tag = (const unsigned char *)ciphertext + payload_len;
 
     compute_nonce(ctx->iv, ctx->seq, nonce);
     build_aad(ct_len, aad);
 
-    /* Copy ciphertext to output buffer for in-place decryption */
-    memcpy(dec_buf, ciphertext, ct_len);
+    /* Copy only the encrypted payload for in-place decryption; the tag
+     * stays in the caller's buffer and is never written to. */
+    memcpy(dec_buf, ciphertext, payload_len);
 
     if (ctx->cipher_suite == TLS_CHACHA20_POLY1305_SHA256) {
         /*
          * br_poly1305_ctmul_run decrypts in place but does NOT verify
-         * the tag: it overwrites the tag buffer with the computed tag,
+         * the tag: it writes the computed tag to the buffer it is given,
          * and "the caller is responsible for checking that the computed
-         * tag matches the expected value" (bearssl_block.h). Keep the
-         * received tag and compare — otherwise any record would be
+         * tag matches the expected value" (bearssl_block.h). Compare it
+         * against the received tag — otherwise any record would be
          * accepted, and a wrong key would go unnoticed.
          */
-        unsigned char received_tag[16];
-        memcpy(received_tag, dec_buf + payload_len, sizeof(received_tag));
+        unsigned char computed_tag[TLS13_TAG_SIZE];
+        unsigned char diff = 0;
+        size_t i;
 
         br_poly1305_ctmul_run(ctx->key, nonce,
                               dec_buf, payload_len,
                               aad, sizeof(aad),
-                              dec_buf + payload_len, /* computed tag */
+                              computed_tag,
                               br_chacha20_ct_run,
                               0 /* decrypt */);
-        {
-            unsigned char diff = 0;
-            size_t i;
-            for (i = 0; i < sizeof(received_tag); i++) {
-                diff |= (unsigned char)(received_tag[i] ^ dec_buf[payload_len + i]);
-            }
-            ok = (diff == 0);
+        for (i = 0; i < sizeof(computed_tag); i++) {
+            diff |= (unsigned char)(received_tag[i] ^ computed_tag[i]);
         }
+        ok = (diff == 0);
     } else {
         /* AES-GCM */
         /* Rebind after a context copy: GCM keeps a pointer to the AES
@@ -180,10 +187,10 @@ int tls13_record_decrypt(tls13_record_ctx *ctx,
         br_gcm_aad_inject(gcm, aad, sizeof(aad));
         br_gcm_flip(gcm);
         br_gcm_run(gcm, 0 /* decrypt */, dec_buf, payload_len);
-        ok = br_gcm_check_tag(gcm, dec_buf + payload_len);
+        ok = br_gcm_check_tag(gcm, received_tag);
     }
 
-    if (!ok) return -1;
+    if (!ok) goto fail;
 
     /* Extract real content type: last non-zero byte of decrypted payload.
      * RFC 8446: "The content type is the real content type of the record.
@@ -191,11 +198,19 @@ int tls13_record_decrypt(tls13_record_ctx *ctx,
     {
         size_t i = payload_len;
         while (i > 0 && dec_buf[i - 1] == 0) i--;
-        if (i == 0) return -1; /* all zeros — invalid */
+        if (i == 0) goto fail; /* all zeros — invalid */
+        content_len = i - 1;
+        if (content_len > TLS13_MAX_PLAINTEXT) goto fail;
         *out_ct = dec_buf[i - 1];
-        *out_len = i - 1;
+        *out_len = content_len;
     }
 
     ctx->seq++;
     return 0;
+
+fail:
+    /* Don't leave unauthenticated or rejected plaintext in the caller's
+     * buffer, where a later length mix-up could expose it. */
+    memset(dec_buf, 0, payload_len);
+    return -1;
 }
