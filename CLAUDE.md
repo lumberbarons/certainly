@@ -29,7 +29,9 @@ There are **two** build environments and they are not interchangeable:
 
 2. **Host build** — `tests/host/Makefile` compiles unit tests with the
    developer's native `cc`. Used for fast iteration on platform-independent
-   code (key schedule, HTTP parser).
+   code (key schedule, HTTP parser, record layer bounds). The record tests
+   also compile the real `src/certainly.c` pump against stub Mac headers in
+   `tests/host/stubs/`.
    ```sh
    cd tests/host && make test
    ```
@@ -46,10 +48,14 @@ unknown" in source files under `src/` or `examples/`, that is expected
 | `src/certainly.c`     | Public-API entry points and the BearSSL ↔ OT pump. |
 | `src/ot_transport.c`  | Async Open Transport TCP — connect, send, receive. |
 | `src/tls13_*.c`       | TLS 1.3 handshake, key schedule, record layer. |
+| `src/entropy.c`       | Trusted-seed requirement and provider (portable; host-tested). `entropy_mac.c` holds the supplemental Mac inputs. |
 | `src/ca_roots.c`      | Generated Mozilla trust anchors (do not hand-edit). |
 | `tools/`              | CA bundle regeneration script and helpers. |
 | `examples/postman/`   | HTTPS request builder. UI is split into `ui.c`, HTTP in `http.c`, glue in `postman.c`. |
 | `tests/host/`         | Host-side unit tests. Add new ones to the Makefile. |
+| `tests/host/platform/`| Native stand-ins for Open Transport, `NewPtrClear`, `TickCount` and OS entropy, used by the conformance client. Test-only. |
+| `tests/conformance/`  | Native TLS client, fixtures and checks against controlled peers; see its README. |
+| `specs/`              | Feature specs with task lists. |
 | `docs/superpowers/`   | Design specs and implementation plans (historical context). |
 
 ## Coding conventions
@@ -70,6 +76,18 @@ unknown" in source files under `src/` or `examples/`, that is expected
 - **Comments.** Explain *why*, not *what*. Do not leave commentary about
   previous attempts, in-progress fixes, or task numbers in the source.
 
+## Entropy
+
+Mac OS 9 has no verifiable entropy source, so key generation requires an
+application-supplied trusted seed (`MacTLS_SeedTrusted` /
+`MacTLS_SetEntropyProvider`). `MacTLS_Create*` must fail with
+`kMacTLS_ErrEntropy` before any key is generated if there is none, and the
+TLS 1.3 handshake must check the engine DRBG was seeded that way. Timer,
+mouse and settings values are supplemental input only: never count them as
+entropy, never let them make seeding succeed, and never read uninitialised
+memory as a source. Keep Mac OS calls in `entropy_mac.c` so `entropy.c`
+stays testable on the host.
+
 ## TLS version strategy
 
 `MacTLS_Create` always begins with a TLS 1.3 ClientHello that also
@@ -85,10 +103,16 @@ explicitly rejected to keep the transcript hash logic simple.
 ## Testing
 
 - **Host tests** (`tests/host/`) — must pass before any commit that
-  touches the key schedule, HTTP parser, connection closure in
-  `src/certainly.c` (`test_closure` compiles it against fake Mac headers
-  in `tests/host/fake/`), or any other portable code.
-  Run with `make test` from that directory.
+  touches the key schedule, HTTP parser, entropy handling, connection
+  closure in `src/certainly.c` (`test_closure` compiles it against fake Mac
+  headers in `tests/host/fake/`), or any other portable code.
+  Run with `make test` from that directory. Changes to record
+  decryption or the receive path should also pass `make asan`.
+- **Conformance check** (`make conformance-check` in `tests/host/`) —
+  drives the real pump from a native client against OpenSSL and fault
+  peers. Run it after changes to `src/certainly.c`, the handshake, record
+  or entropy code. Needs OpenSSL with `s_server -ciphersuites` and `uv`;
+  see `tests/conformance/README.md`.
 - **Emulator smoke tests** — for changes to the OT transport, handshake
   driver, or example apps, build with Retro68 and exercise the resulting
   `.dsk` in SheepShaver or QEMU. The Postman example is the most
@@ -108,3 +132,14 @@ explicitly rejected to keep the transcript hash logic simple.
   tested independently of Mac OS.
 - Do not commit `build/`, `.dsk` outputs, or generated trust anchor
   files.
+
+## Architectural Decisions
+
+ADRs live in `docs/adr/`. Read relevant ADRs before proposing architectural
+changes: accepted ADRs record constraints and rejected alternatives; proposed
+ADRs await review and do not establish policy. Specs should cite the decisions
+that constrain them; ADRs do not track their downstream consumers.
+
+| ADR | When this applies |
+|---|---|
+| [ADR-0001](docs/adr/0001-test-shared-tls-code-natively-with-tls-anvil.md) (proposed) | Changes to conformance testing, the host/target platform boundary, shared TLS or pump code, test validation, or interpretation of suite results. |

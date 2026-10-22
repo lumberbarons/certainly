@@ -16,6 +16,7 @@ add_library(certainly STATIC
     src/certainly.c
     src/ot_transport.c
     src/entropy.c
+    src/entropy_mac.c
     src/ca_roots.c
     src/tls13_keysched.c
     src/tls13_record.c

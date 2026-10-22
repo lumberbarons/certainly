@@ -21,6 +21,7 @@
 #include "certainly.h"
 #include "ui.h"
 #include "http.h"
+#include "seed_file.h"
 
 int gQuit = 0;
 
@@ -51,6 +52,11 @@ static const char *tls_version_label(MacTLS_Version v)
 
 static void format_tls_error(char *out, size_t cap)
 {
+    if (gCtx && MacTLS_GetError(gCtx) == kMacTLS_ErrEntropy) {
+        snprintf(out, cap, "No trusted seed: provide \"%s\" (see README)",
+                 kSeedFileName);
+        return;
+    }
     snprintf(out, cap, "TLS error: code=%d bssl=%d OT=%ld",
              gCtx ? MacTLS_GetError(gCtx)        : -1,
              gCtx ? MacTLS_GetBearSSLError(gCtx) : 0,
@@ -387,6 +393,7 @@ static void on_send_click(void)
 int main(void)
 {
     EventRecord event;
+    const char *seedError;
 
     InitGraf(&qd.thePort);
     InitFonts();
@@ -398,9 +405,11 @@ int main(void)
 
     InitOpenTransport();
     MacTLS_Init();
+    seedError = SeedFromFile();
 
     ui_init();
     ui_set_send_handler(on_send_click);
+    if (seedError != NULL) ui_set_status(seedError);
 
     while (!gQuit) {
         WaitNextEvent(everyEvent, &event, gSending ? 1 : 10, NULL);

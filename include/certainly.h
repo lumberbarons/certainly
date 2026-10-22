@@ -9,6 +9,7 @@
  * Usage pattern:
  *
  *   MacTLS_Init();
+ *   MacTLS_SeedTrusted(seed, sizeof(seed));   // required, see "Entropy"
  *   ctx = MacTLS_Create("api.example.com", 443);
  *
  *   // In your event loop:
@@ -61,6 +62,7 @@ typedef enum {
     kMacTLS_ErrWrite,
     kMacTLS_ErrClosed,
     kMacTLS_ErrOT,
+    kMacTLS_ErrEntropy,     /* No trusted seed available (see "Entropy"). */
     kMacTLS_ErrPeerAlert,   /* Authenticated fatal alert from the peer. */
     kMacTLS_ErrTruncated    /* Transport ended without a close_notify. */
 } MacTLS_Error;
@@ -100,7 +102,7 @@ void         MacTLS_Shutdown(void);
  * Create a TLS connection context and begin connecting.
  *
  * Returns NULL only on allocation failure. On other errors (invalid hostname,
- * transport failure), returns a non-NULL context in kMacTLS_Error state.
+ * missing trusted seed, transport failure), returns a non-NULL context in kMacTLS_Error state.
  * ALWAYS check MacTLS_GetState() after Create — a NULL check alone is not
  * sufficient:
  *
@@ -136,7 +138,63 @@ void           MacTLS_ConfigFree(MacTLS_Config *cfg);
 MacTLS_Error   MacTLS_ConfigAddCA(MacTLS_Config *cfg,
                                   const void *der, size_t len);
 
-/* ── Entropy ── */
+/* ── Entropy ──
+ *
+ * Mac OS 9 has no cryptographic random number generator, and nothing the
+ * library can read (timers, mouse, location settings) comes with an
+ * entropy guarantee. TLS ephemeral keys and client randoms are therefore
+ * generated only after the application supplies a TRUSTED seed: bytes it
+ * vouches are unpredictable to an attacker, such as output of a hardware
+ * RNG or a seed file provisioned from a good source (see
+ * tools/make_seed.sh) and replaced after every use. The library cannot
+ * check this claim; a predictable seed gives predictable keys.
+ *
+ * Without a trusted source, MacTLS_Create / MacTLS_CreateWithConfig
+ * return a context in kMacTLS_Error state with error kMacTLS_ErrEntropy
+ * before opening a connection or generating any key. Both the TLS 1.3 and
+ * TLS 1.2 paths are covered, since both draw from the same generator.
+ *
+ * Provide the seed with MacTLS_SeedTrusted() or MacTLS_SetEntropyProvider();
+ * either may be called before or after MacTLS_Init(), and
+ * MacTLS_Shutdown() discards both.
+ */
+
+/* Minimum length accepted by MacTLS_SeedTrusted(). */
+#define kMacTLS_MinSeedBytes 32
+
+/*
+ * Fill `out` with `len` bytes that are unpredictable to an attacker and
+ * different on every call. Return non-zero on success, zero on failure
+ * (which fails connection setup; there is no fallback to another source).
+ * Called once per connection with len == 32.
+ */
+typedef int (*MacTLS_EntropyProvider)(void *userData, void *out, size_t len);
+
+/*
+ * Seed the library's generator with `len` >= kMacTLS_MinSeedBytes trusted
+ * bytes. Repeated calls add to its state. Returns kMacTLS_ErrEntropy for
+ * a short seed or one whose bytes are all identical (a misuse guard, not a
+ * quality test). A provider, if registered, takes precedence.
+ */
+MacTLS_Error MacTLS_SeedTrusted(const void *seed, size_t len);
+
+/* Register a provider consulted for every connection; NULL removes it. */
+void MacTLS_SetEntropyProvider(MacTLS_EntropyProvider provider,
+                               void *userData);
+
+/*
+ * Draw `len` >= kMacTLS_MinSeedBytes bytes from the trusted generator,
+ * e.g. to write back a replacement seed file so the next launch does not
+ * repeat this one. Returns kMacTLS_ErrEntropy if `len` is too short or no
+ * trusted source is available.
+ */
+MacTLS_Error MacTLS_ExportSeed(void *out, size_t len);
+
+/*
+ * Mix extra bytes (user input timing, ...) into the supplemental pool.
+ * This is only additional input: it never counts as, or substitutes for,
+ * a trusted seed.
+ */
 void MacTLS_AddEntropy(const void *data, size_t len);
 
 #endif /* CERTAINLY_H */
