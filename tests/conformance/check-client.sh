@@ -202,6 +202,13 @@ for entry in $suite_matrix; do
     else
         bad "no would-block was injected"
     fi
+
+    base "$port" --mode data --send "$fix/line.txt" --send-only \
+        --single-connection --write-chunk 1 --wouldblock-every 3
+    run "$suite-send-only" 8000 "${run_args[@]}"
+    expect_positive "send-only flushes the payload with partial writes"
+    expect_field "the peer received and answered the full line" bytes_received "$(wc -c <"$fix/line.expected" | tr -d ' ')"
+    expect_field "exactly one socket was opened" connections 1
     stop "$srv"
 
     echo "== multi-record download, $suite"
@@ -331,6 +338,7 @@ for cut in eof reset stall; do
                expect_outcome "peer goes silent after the handshake" timeout 12 ;;
     esac
     expect_field "ended in the data phase" phase data
+    expect_field "retains the negotiated version after peer closure" tls_version 1.3
     stop "$srv"
     stop "$tlssrv"
 done
