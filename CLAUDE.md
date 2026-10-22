@@ -103,8 +103,9 @@ explicitly rejected to keep the transcript hash logic simple.
 ## Testing
 
 - **Host tests** (`tests/host/`) — must pass before any commit that
-  touches the key schedule, HTTP parser, entropy handling, or any other
-  portable code.
+  touches the key schedule, HTTP parser, entropy handling, connection
+  closure in `src/certainly.c` (`test_closure` compiles it against fake Mac
+  headers in `tests/host/fake/`), or any other portable code.
   Run with `make test` from that directory. Changes to record
   decryption or the receive path should also pass `make asan`.
 - **Conformance check** (`make conformance-check` in `tests/host/`) —

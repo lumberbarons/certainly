@@ -62,8 +62,29 @@ typedef enum {
     kMacTLS_ErrWrite,
     kMacTLS_ErrClosed,
     kMacTLS_ErrOT,
-    kMacTLS_ErrEntropy      /* No trusted seed available (see "Entropy"). */
+    kMacTLS_ErrEntropy,     /* No trusted seed available (see "Entropy"). */
+    kMacTLS_ErrPeerAlert,   /* Authenticated fatal alert from the peer. */
+    kMacTLS_ErrTruncated    /* Transport ended without a close_notify. */
 } MacTLS_Error;
+
+/*
+ * How a connection ends:
+ *
+ *   kMacTLS_Closed  The peer sent an authenticated close_notify. Every byte
+ *                   it sent has been delivered; MacTLS_Read() drains what is
+ *                   buffered. This is the only state that proves the data
+ *                   stream is complete.
+ *   kMacTLS_Error   Anything else. kMacTLS_ErrTruncated means the TCP
+ *                   connection was closed or reset before a close_notify, so
+ *                   data may have been cut off by an attacker (RFC 8446
+ *                   section 6.1); callers whose protocol has its own framing
+ *                   (e.g. HTTP Content-Length) may still accept a message
+ *                   that is complete by that framing. kMacTLS_ErrPeerAlert
+ *                   means a fatal alert arrived; MacTLS_GetBearSSLError()
+ *                   returns BR_ERR_RECV_FATAL_ALERT plus the alert
+ *                   description. Malformed or unauthenticated closure
+ *                   records report kMacTLS_ErrRead.
+ */
 
 typedef enum {
     kMacTLS_VersionUnknown = 0,    /* Handshake not yet complete. */

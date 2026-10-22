@@ -79,6 +79,16 @@ every operation yields before the next one begins.
 After `kMacTLS_Connected`, `MacTLS_GetVersion` returns `kMacTLS_Version12` or
 `kMacTLS_Version13` so you can show users which protocol was negotiated.
 
+**Only `kMacTLS_Closed` means the peer finished.** It is reported solely for an
+authenticated `close_notify`. A connection that is cut off, reset, or ended by
+a fatal or forged alert arrives as `kMacTLS_Error` (`kMacTLS_ErrTruncated`,
+`kMacTLS_ErrPeerAlert`, or `kMacTLS_ErrRead`), because anyone on the network
+path can end a TCP stream early. Data received before the error was
+authenticated and has already been returned by `MacTLS_Read`; whether a
+truncated stream still counts as complete is up to the protocol on top (an
+HTTP response with a satisfied `Content-Length` does, a body that runs to
+end-of-connection does not). Postman applies exactly that rule.
+
 ---
 
 ## Entropy
@@ -193,17 +203,21 @@ cd tests/host && make test
 ```
 
 Runs the TLS 1.3 key schedule tests against RFC 8448 vectors, the HTTP
-request/response unit tests, and the trusted-seed tests (substituted sources,
-no reliance on timers) on the developer machine — no emulator needed. It also
-exercises TLS 1.3 record decryption bounds through the handshake and
-application-data paths; `make asan` repeats those under AddressSanitizer. Run
-these before committing any change to the key schedule, record layer, HTTP
-parser or entropy handling. The first run builds a host copy of BearSSL.
+request/response unit tests, the trusted-seed tests (substituted sources,
+no reliance on timers), and connection-closure tests that drive
+`src/certainly.c` against a scripted transport on the developer machine — no
+emulator needed. It also exercises TLS 1.3 record decryption bounds through the
+handshake and application-data paths; `make asan` repeats those under
+AddressSanitizer. Run these before committing any change to the key schedule,
+record layer, HTTP parser, pump/closure logic or entropy handling. The first
+run builds a host copy of BearSSL.
 
-These do not exercise `src/entropy_mac.c`, Open Transport, or the Mac OS 9
-build; the seed-file helper in `examples/common` and the Create/Pump wiring
-have only been checked by reading, not by a Retro68 build or an emulator or
-hardware run. Validate those on the target before relying on them.
+The closure tests cover record handling and state reporting; Open Transport
+event timing and a live TLS 1.2 handshake still need an emulator or real
+hardware. `src/entropy_mac.c`, the seed-file helper in `examples/common` and
+the Create/Pump wiring have only been checked by reading, not by a Retro68
+build or an emulator or hardware run. Validate those on the target before
+relying on them.
 
 For complete native TLS connections, `make -C tests/host conformance-check`
 checks controlled peers. The pinned external TLS-Anvil smoke is one command:

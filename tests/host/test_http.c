@@ -374,6 +374,264 @@ static void test_headers_is_chunked(void)
     EXPECT_EQ_INT("chunked hdr: empty", 0, http_headers_is_chunked("", 0));
 }
 
+/* Run the same framing/verdict pipeline Postman uses on a raw response. */
+static HttpVerdict assess(const char *raw, int is_head, HttpEnd end,
+                          size_t *used_out)
+{
+    const char *status, *headers, *body;
+    size_t status_len, headers_len, body_len, used = 0;
+    size_t off = http_final_response_offset(raw, strlen(raw));
+    HttpBodyState framing;
+
+    if (http_split_response(raw + off, strlen(raw) - off,
+                            &status, &status_len, &headers, &headers_len,
+                            &body, &body_len) != 0)
+        return kHttpVerdict_Malformed;
+    framing = http_check_body_framing(status, status_len, headers, headers_len,
+                                      body, body_len, is_head, &used);
+    if (used_out) *used_out = used;
+    return http_response_verdict(framing, end);
+}
+
+static void test_chunked_truncation(void)
+{
+    char out[256];
+    size_t written = 0, consumed = 0;
+
+    /* Terminal chunk without the final CRLF: the transfer was cut. */
+    const char *cut1 = "5\r\nHello\r\n0\r\n";
+    EXPECT_EQ_INT("chunked: missing final CRLF is incomplete",
+                  kHttpChunk_Incomplete,
+                  http_decode_chunked_ex(cut1, strlen(cut1), out, sizeof(out),
+                                         &written, &consumed));
+    EXPECT_EQ_INT("chunked: incomplete keeps decoded prefix", 5, (int)written);
+    EXPECT_EQ_INT("chunked: decode wrapper rejects missing final CRLF", -1,
+                  http_decode_chunked(cut1, strlen(cut1), out, sizeof(out)));
+
+    /* Cut in the middle of a chunk's data */
+    const char *cut2 = "a\r\n01234";
+    EXPECT_EQ_INT("chunked: partial chunk data is incomplete",
+                  kHttpChunk_Incomplete,
+                  http_decode_chunked_ex(cut2, strlen(cut2), out, sizeof(out),
+                                         &written, NULL));
+    EXPECT_EQ_INT("chunked: partial chunk bytes kept", 5, (int)written);
+
+    /* Cut in the middle of a size line / right after the data */
+    const char *cut3 = "5\r\nHello\r\n1";
+    EXPECT_EQ_INT("chunked: size line cut is incomplete", kHttpChunk_Incomplete,
+                  http_decode_chunked_ex(cut3, strlen(cut3), out, sizeof(out),
+                                         &written, NULL));
+    const char *cut4 = "5\r\nHello";
+    EXPECT_EQ_INT("chunked: missing CRLF after data is incomplete",
+                  kHttpChunk_Incomplete,
+                  http_decode_chunked_ex(cut4, strlen(cut4), out, sizeof(out),
+                                         &written, NULL));
+    EXPECT_EQ_INT("chunked: empty input is incomplete", kHttpChunk_Incomplete,
+                  http_decode_chunked_ex("", 0, out, sizeof(out), &written, NULL));
+
+    /* Trailers must be terminated too */
+    const char *tr1 = "3\r\nabc\r\n0\r\nX-Sum: 1\r\n\r\n";
+    EXPECT_EQ_INT("chunked: trailers then blank line is done", kHttpChunk_Done,
+                  http_decode_chunked_ex(tr1, strlen(tr1), out, sizeof(out),
+                                         &written, &consumed));
+    EXPECT_EQ_INT("chunked: consumed whole message", (int)strlen(tr1),
+                  (int)consumed);
+    const char *tr2 = "3\r\nabc\r\n0\r\nX-Sum: 1\r\n";
+    EXPECT_EQ_INT("chunked: unterminated trailers are incomplete",
+                  kHttpChunk_Incomplete,
+                  http_decode_chunked_ex(tr2, strlen(tr2), out, sizeof(out),
+                                         &written, NULL));
+
+    /* Malformed is distinct from truncated */
+    const char *bad1 = "5\r\nHelloXX0\r\n\r\n";
+    EXPECT_EQ_INT("chunked: junk after data is malformed", kHttpChunk_Malformed,
+                  http_decode_chunked_ex(bad1, strlen(bad1), out, sizeof(out),
+                                         &written, NULL));
+    const char *bad2 = "ffffffffffffffffff\r\n";
+    EXPECT_EQ_INT("chunked: length overflow is malformed", kHttpChunk_Malformed,
+                  http_decode_chunked_ex(bad2, strlen(bad2), out, sizeof(out),
+                                         &written, NULL));
+    char tiny[2];
+    const char *big = "5\r\nHello\r\n0\r\n\r\n";
+    EXPECT_EQ_INT("chunked: output overflow reported", kHttpChunk_Overflow,
+                  http_decode_chunked_ex(big, strlen(big), tiny, sizeof(tiny),
+                                         &written, NULL));
+
+    /* Framing-only walk (out == NULL) */
+    EXPECT_EQ_INT("chunked: NULL out walks framing", kHttpChunk_Done,
+                  http_decode_chunked_ex(big, strlen(big), NULL, 0,
+                                         &written, &consumed));
+
+    /* In-place decoding still works */
+    char inplace[] = "5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n";
+    int n = http_decode_chunked(inplace, strlen(inplace), inplace,
+                                sizeof(inplace));
+    EXPECT_EQ_INT("chunked: in-place rc", 11, n);
+    if (n == 11) EXPECT_EQ_MEM("chunked: in-place data", "Hello World", inplace, 11);
+
+    /* Only a bare "chunked" token selects chunked framing */
+    const char *te1 = "Transfer-Encoding: chunkedx";
+    EXPECT_EQ_INT("chunked hdr: token must match exactly", 0,
+                  http_headers_is_chunked(te1, strlen(te1)));
+    const char *te2 = "Transfer-Encoding: chunked  ";
+    EXPECT_EQ_INT("chunked hdr: trailing blanks ok", 1,
+                  http_headers_is_chunked(te2, strlen(te2)));
+}
+
+static void test_content_length_framing(void)
+{
+    size_t used = 0;
+
+    const char *full =
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello";
+    EXPECT_EQ_INT("cl: complete body, authenticated close",
+                  kHttpVerdict_Complete,
+                  assess(full, 0, kHttpEnd_CloseNotify, &used));
+    EXPECT_EQ_INT("cl: complete body, FIN without close_notify still complete",
+                  kHttpVerdict_Complete,
+                  assess(full, 0, kHttpEnd_Truncated, &used));
+    EXPECT_EQ_INT("cl: used = declared length", 5, (int)used);
+
+    const char *cut =
+        "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nHello";
+    EXPECT_EQ_INT("cl: short body is incomplete (FIN)", kHttpVerdict_Incomplete,
+                  assess(cut, 0, kHttpEnd_Truncated, &used));
+    EXPECT_EQ_INT("cl: short body is incomplete even after close_notify",
+                  kHttpVerdict_Incomplete,
+                  assess(cut, 0, kHttpEnd_CloseNotify, &used));
+    EXPECT_EQ_INT("cl: incomplete keeps what arrived", 5, (int)used);
+
+    const char *extra =
+        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabcdef";
+    EXPECT_EQ_INT("cl: surplus bytes beyond length", kHttpVerdict_Complete,
+                  assess(extra, 0, kHttpEnd_CloseNotify, &used));
+    EXPECT_EQ_INT("cl: surplus bytes are not part of the message", 3, (int)used);
+
+    const char *zero = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    EXPECT_EQ_INT("cl: zero length", kHttpVerdict_Complete,
+                  assess(zero, 0, kHttpEnd_Truncated, &used));
+
+    const char *dup_ok =
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\ncontent-length: 2\r\n\r\nhi";
+    EXPECT_EQ_INT("cl: repeated identical values", kHttpVerdict_Complete,
+                  assess(dup_ok, 0, kHttpEnd_CloseNotify, &used));
+    const char *dup_bad =
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 9\r\n\r\nhi";
+    EXPECT_EQ_INT("cl: conflicting values are malformed", kHttpVerdict_Malformed,
+                  assess(dup_bad, 0, kHttpEnd_CloseNotify, &used));
+    const char *neg =
+        "HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\nhi";
+    EXPECT_EQ_INT("cl: negative is malformed", kHttpVerdict_Malformed,
+                  assess(neg, 0, kHttpEnd_CloseNotify, &used));
+    const char *junk =
+        "HTTP/1.1 200 OK\r\nContent-Length: 2x\r\n\r\nhi";
+    EXPECT_EQ_INT("cl: trailing junk is malformed", kHttpVerdict_Malformed,
+                  assess(junk, 0, kHttpEnd_CloseNotify, &used));
+    const char *huge =
+        "HTTP/1.1 200 OK\r\nContent-Length: 99999999999999999999999\r\n\r\nhi";
+    EXPECT_EQ_INT("cl: overflowing value is malformed", kHttpVerdict_Malformed,
+                  assess(huge, 0, kHttpEnd_CloseNotify, &used));
+}
+
+static void test_eof_delimited_and_bodyless(void)
+{
+    size_t used = 0;
+
+    const char *eof = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nstreamed";
+    EXPECT_EQ_INT("eof body: close_notify proves completeness",
+                  kHttpVerdict_Complete,
+                  assess(eof, 0, kHttpEnd_CloseNotify, &used));
+    EXPECT_EQ_INT("eof body: FIN without close_notify is unverified",
+                  kHttpVerdict_Unverified,
+                  assess(eof, 0, kHttpEnd_Truncated, &used));
+    EXPECT_EQ_INT("eof body: everything received belongs to the body", 8,
+                  (int)used);
+
+    const char *gz = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nxx";
+    EXPECT_EQ_INT("eof body: non-chunked coding is close-delimited",
+                  kHttpVerdict_Unverified,
+                  assess(gz, 0, kHttpEnd_Truncated, &used));
+
+    const char *nc = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+    EXPECT_EQ_INT("204 never has a body", kHttpVerdict_Complete,
+                  assess(nc, 0, kHttpEnd_Truncated, &used));
+    const char *nm = "HTTP/1.1 304 Not Modified\r\nContent-Length: 500\r\n\r\n";
+    EXPECT_EQ_INT("304 ignores Content-Length", kHttpVerdict_Complete,
+                  assess(nm, 0, kHttpEnd_Truncated, &used));
+    const char *hd = "HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n";
+    EXPECT_EQ_INT("HEAD ignores Content-Length", kHttpVerdict_Complete,
+                  assess(hd, 1, kHttpEnd_Truncated, &used));
+    EXPECT_EQ_INT("GET with the same bytes is incomplete", kHttpVerdict_Incomplete,
+                  assess(hd, 0, kHttpEnd_Truncated, &used));
+
+    const char *both =
+        "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nTransfer-Encoding: chunked\r\n"
+        "\r\n2\r\nhi\r\n0\r\n\r\n";
+    EXPECT_EQ_INT("Transfer-Encoding wins over Content-Length",
+                  kHttpVerdict_Complete,
+                  assess(both, 0, kHttpEnd_Truncated, &used));
+}
+
+static void test_chunked_framing(void)
+{
+    size_t used = 0;
+    const char *full =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "5\r\nHello\r\n0\r\n\r\n";
+    EXPECT_EQ_INT("chunked resp: complete", kHttpVerdict_Complete,
+                  assess(full, 0, kHttpEnd_Truncated, &used));
+    EXPECT_EQ_INT("chunked resp: used covers framing", 15, (int)used);
+
+    const char *cut =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "5\r\nHello\r\n0\r\n";
+    EXPECT_EQ_INT("chunked resp: cut before final CRLF is incomplete",
+                  kHttpVerdict_Incomplete,
+                  assess(cut, 0, kHttpEnd_Truncated, &used));
+    EXPECT_EQ_INT("chunked resp: stays incomplete after close_notify",
+                  kHttpVerdict_Incomplete,
+                  assess(cut, 0, kHttpEnd_CloseNotify, &used));
+
+    const char *prefix =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "5\r\nHello\r\n";
+    EXPECT_EQ_INT("chunked resp: valid prefix without terminal chunk",
+                  kHttpVerdict_Incomplete,
+                  assess(prefix, 0, kHttpEnd_Truncated, &used));
+
+    const char *bad =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "zz\r\nHello\r\n0\r\n\r\n";
+    EXPECT_EQ_INT("chunked resp: bad chunk is malformed, not raw fallback",
+                  kHttpVerdict_Malformed,
+                  assess(bad, 0, kHttpEnd_CloseNotify, &used));
+}
+
+static void test_interim_and_truncated_headers(void)
+{
+    size_t used = 0;
+    const char *raw =
+        "HTTP/1.1 100 Continue\r\n\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
+    EXPECT_EQ_INT("interim: skipped to final response", 25,
+                  (int)http_final_response_offset(raw, strlen(raw)));
+    EXPECT_EQ_INT("interim: final response judged", kHttpVerdict_Complete,
+                  assess(raw, 0, kHttpEnd_CloseNotify, &used));
+
+    const char *only = "HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n";
+    EXPECT_EQ_INT("interim: no final response yet is malformed",
+                  kHttpVerdict_Malformed,
+                  assess(only, 0, kHttpEnd_Truncated, &used));
+
+    const char *sw = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\n";
+    EXPECT_EQ_INT("interim: 101 is final", 0,
+                  (int)http_final_response_offset(sw, strlen(sw)));
+
+    const char *hdrs = "HTTP/1.1 200 OK\r\nContent-Le";
+    EXPECT_EQ_INT("cut headers have no message", kHttpVerdict_Malformed,
+                  assess(hdrs, 0, kHttpEnd_Truncated, &used));
+}
+
 int main(void)
 {
     test_smoke();
@@ -382,6 +640,11 @@ int main(void)
     test_split_response();
     test_decode_chunked();
     test_headers_is_chunked();
+    test_chunked_truncation();
+    test_content_length_framing();
+    test_eof_delimited_and_bodyless();
+    test_chunked_framing();
+    test_interim_and_truncated_headers();
 
     printf("\n%d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;

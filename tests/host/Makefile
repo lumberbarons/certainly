@@ -58,7 +58,7 @@ BEARSSL_TOOLS = ../../bearssl/tools
 .PHONY: all clean clean-client test asan conformance-client conformance-check \
         conformance-anvil conformance-anvil-reference conformance-runner-check
 
-all: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport
+all: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport test_closure
 
 test_keysched: test_keysched.c $(SRC)/tls13_keysched.c $(SRC)/tls13_keysched.h
 	$(CC) $(CFLAGS) -I$(BEARSSL_INC) -I$(BEARSSL_SRC) -I$(SRC) \
@@ -79,7 +79,7 @@ test_entropy: test_entropy.c $(SRC)/entropy.c $(SRC)/entropy.h \
 		-o $@ test_entropy.c $(SRC)/entropy.c $(SRC)/tls13_handshake.c \
 		$(SRC)/tls13_keysched.c $(SRC)/tls13_record.c $(BEARSSL_LIB)
 
-test: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport
+test: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport test_closure
 	./test_keysched
 	./test_http
 	./test_entropy
@@ -87,6 +87,7 @@ test: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport
 	./test_record_handshake
 	./test_record_app
 	./test_host_transport
+	./test_closure
 
 test_record: test_record.c $(RECORD_HDRS) $(BEARSSL_LIB)
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) -I$(BEARSSL_INC) -I$(SRC) \
@@ -157,10 +158,10 @@ conformance-runner-check:
 # conformance client takes the same flags:
 #   make clean-client conformance-check EXTRA_CFLAGS="$(SAN_FLAGS)"
 asan:
-	rm -rf $(RECORD_TESTS) *.dSYM
-	$(MAKE) $(RECORD_TESTS) EXTRA_CFLAGS="$(SAN_FLAGS)"
-	for t in $(RECORD_TESTS); do ./$$t || exit 1; done
-	rm -rf $(RECORD_TESTS) *.dSYM
+	rm -rf $(RECORD_TESTS) test_closure *.dSYM
+	$(MAKE) $(RECORD_TESTS) test_closure EXTRA_CFLAGS="$(SAN_FLAGS)"
+	for t in $(RECORD_TESTS) test_closure; do ./$$t || exit 1; done
+	rm -rf $(RECORD_TESTS) test_closure *.dSYM
 
 test_http: test_http.c ../../examples/postman/http.c \
            ../../examples/postman/http.h
@@ -170,6 +171,15 @@ test_http: test_http.c ../../examples/postman/http.c \
 test_http_run: test_http
 	./test_http
 
+# test_closure builds src/certainly.c against the fake Mac headers in fake/.
+CLOSURE_SRCS = $(SRC)/certainly.c $(SRC)/entropy.c $(SRC)/tls13_handshake.c \
+	$(SRC)/tls13_keysched.c $(SRC)/tls13_record.c $(SRC)/ca_roots.c
+
+test_closure: test_closure.c fake/OpenTransport.h $(CLOSURE_SRCS) \
+              $(SRC)/certainly_internal.h $(BEARSSL_LIB)
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) -Ifake -I$(BEARSSL_INC) -I$(SRC) -I../../include \
+		-o $@ test_closure.c $(CLOSURE_SRCS) $(BEARSSL_LIB)
+
 clean:
-	rm -rf test_keysched test_http test_entropy test_host_transport \
+	rm -rf test_keysched test_http test_entropy test_host_transport test_closure \
 		$(RECORD_TESTS) $(BEARSSL_LIB) obj $(CONF_OUT) *.dSYM

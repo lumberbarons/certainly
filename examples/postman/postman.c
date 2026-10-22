@@ -30,6 +30,7 @@ static MacTLS_Context *gCtx              = NULL;
 static int             gSending          = 0;
 static int             gCancelled        = 0;
 static int             gRequestSent      = 0;
+static int             gRequestIsHead    = 0;
 static char            gRequestBuf[8192];
 static int             gRequestLen       = 0;
 static char            gResponseBuf[32768];
@@ -76,7 +77,7 @@ static void finalize_send(void)
     ui_set_send_enabled(1);
 }
 
-static void finalize_response(int truncated);
+static void finalize_response(int local_truncated, HttpEnd end);
 
 static void DriveSendStep(void)
 {
@@ -116,7 +117,7 @@ static void DriveSendStep(void)
         if (space <= 0) {
             /* Response buffer saturated — stop waiting for Close we
              * can't drain toward. Finalize with what we have. */
-            finalize_response(1);
+            finalize_response(1, kHttpEnd_Truncated);
             return;
         }
         int n = MacTLS_Read(gCtx, gResponseBuf + gResponseLen,
@@ -148,11 +149,21 @@ static void DriveSendStep(void)
             if (n <= 0) break;
             gResponseLen += n;
         }
-        finalize_response(gResponseLen >= (int)sizeof(gResponseBuf) - 1);
+        finalize_response(gResponseLen >= (int)sizeof(gResponseBuf) - 1,
+                          kHttpEnd_CloseNotify);
         return;
     }
 
     case kMacTLS_Error:
+        /* The peer vanished without a close_notify. What arrived is
+         * authentic but may be a cut-off prefix; whether that matters
+         * depends on the HTTP framing, so judge it there. Every other
+         * error says nothing trustworthy about the response. */
+        if (MacTLS_GetError(gCtx) == kMacTLS_ErrTruncated) {
+            finalize_response(gResponseLen >= (int)sizeof(gResponseBuf) - 1,
+                              kHttpEnd_Truncated);
+            return;
+        }
         format_tls_error(status, sizeof(status));
         ui_set_status(status);
         finalize_send();
@@ -163,26 +174,38 @@ static void DriveSendStep(void)
     }
 }
 
-static void finalize_response(int truncated)
+static void finalize_response(int local_truncated, HttpEnd end)
 {
     const char *status_line; size_t status_len;
     const char *headers;     size_t headers_len;
     const char *body;        size_t body_len;
-    char        status[256];
+    const char *warning = NULL;
+    char        status[320];
+    HttpBodyState framing;
+    HttpVerdict   verdict = kHttpVerdict_Complete;
+    size_t      body_used = 0;
+    size_t      off;
+    int         chunked;
 
     if (gResponseLen == 0) {
-        ui_set_status("Empty response");
+        ui_set_status(end == kHttpEnd_CloseNotify
+                      ? "Empty response"
+                      : "Connection closed before any response (no TLS close_notify)");
         finalize_send();
         return;
     }
 
     gResponseBuf[gResponseLen] = '\0';
 
-    if (http_split_response(gResponseBuf, (size_t)gResponseLen,
+    off = http_final_response_offset(gResponseBuf, (size_t)gResponseLen);
+    if (http_split_response(gResponseBuf + off, (size_t)gResponseLen - off,
                             &status_line, &status_len,
                             &headers,     &headers_len,
                             &body,        &body_len) != 0) {
-        ui_set_status("Malformed HTTP response");
+        /* Without a complete header block there is no message to judge. */
+        ui_set_status(end == kHttpEnd_Truncated
+            ? "INCOMPLETE: connection closed mid-headers (no TLS close_notify)"
+            : "Malformed HTTP response");
         /* Show raw first bytes so the user can see what came back. */
         int show = gResponseLen > 256 ? 256 : gResponseLen;
         ui_set_response(gResponseBuf, (size_t)show);
@@ -190,30 +213,62 @@ static void finalize_response(int truncated)
         return;
     }
 
-    static char decoded_body[32768];
-    if (http_headers_is_chunked(headers, headers_len)) {
-        int dec_len = http_decode_chunked(body, body_len,
-                                          decoded_body, sizeof(decoded_body));
-        if (dec_len >= 0) {
-            body     = decoded_body;
-            body_len = (size_t)dec_len;
+    chunked = http_headers_is_chunked(headers, headers_len);
+    framing = http_check_body_framing(status_line, status_len,
+                                      headers, headers_len,
+                                      body, body_len,
+                                      gRequestIsHead, &body_used);
+
+    /* When our own buffer overflowed the body is short by design; that is
+     * reported as a truncation below, not as a protocol failure. */
+    if (!local_truncated) {
+        verdict = http_response_verdict(framing, end);
+        switch (verdict) {
+        case kHttpVerdict_Incomplete:
+            warning = end == kHttpEnd_Truncated
+                ? "INCOMPLETE: connection ended before the body was complete (no TLS close_notify)"
+                : "INCOMPLETE: body is shorter than the response declared";
+            break;
+        case kHttpVerdict_Unverified:
+            warning = "UNVERIFIED: closed without TLS close_notify, response may be cut off";
+            break;
+        case kHttpVerdict_Malformed:
+            warning = "MALFORMED: invalid message framing";
+            break;
+        default:
+            break;
         }
-        /* On decode failure, fall through and display the raw body. */
     }
 
-    /* Build the status-line string, optionally suffixed with a
-     * truncation note. */
+    static char decoded_body[32768];
+    if (chunked && framing != kHttpBody_Malformed) {
+        size_t written = 0;
+        /* Incomplete bodies still decode what arrived so it can be shown
+         * next to the warning. */
+        http_decode_chunked_ex(body, body_used, decoded_body,
+                               sizeof(decoded_body), &written, NULL);
+        body     = decoded_body;
+        body_len = written;
+    } else if (framing == kHttpBody_Malformed) {
+        /* Never present bytes under a status line when their framing is
+         * not trustworthy. */
+        body_len = 0;
+    } else if (body_used < body_len) {
+        body_len = body_used;
+    }
+
+    /* Build the status-line string. A problem comes first so it cannot be
+     * missed. */
     {
         size_t out_len = status_len;
-        if (out_len > sizeof(status) - 48) out_len = sizeof(status) - 48;
-        memcpy(status, status_line, out_len);
-        status[out_len] = '\0';
-        {
-            char tail[48];
-            snprintf(tail, sizeof(tail), "  (%s%s)",
-                     tls_version_label(gNegotiatedVersion),
-                     truncated ? ", truncated to 32K" : "");
-            strncat(status, tail, sizeof(status) - strlen(status) - 1);
+        if (out_len > 128) out_len = 128;
+        snprintf(status, sizeof(status), "%s%.*s  (%s%s)",
+                 warning ? "[!] " : "", (int)out_len, status_line,
+                 tls_version_label(gNegotiatedVersion),
+                 local_truncated ? ", truncated to 32K" : "");
+        if (warning) {
+            size_t used = strlen(status);
+            snprintf(status + used, sizeof(status) - used, " - %s", warning);
         }
     }
     ui_set_status(status);
@@ -224,6 +279,14 @@ static void finalize_response(int truncated)
     {
         static char display[32768];
         size_t dpos = 0;
+        if (warning) {
+            for (const char *w = warning; *w && dpos < sizeof(display); w++)
+                display[dpos++] = *w;
+            if (dpos + 2 < sizeof(display)) {
+                display[dpos++] = '\r';
+                display[dpos++] = '\r';
+            }
+        }
         for (size_t i = 0; i < headers_len && dpos < sizeof(display); i++) {
             char c = headers[i];
             if (c == '\n') c = '\r';
@@ -295,6 +358,7 @@ static void DoSendAndReceive(void)
     gResponseLen     = 0;
     gPrevResponseLen = 0;
     gRequestSent     = 0;
+    gRequestIsHead   = strcmp(ui_current_method(), "HEAD") == 0;
     ui_clear_response();
 
     /* 5. Create the MacTLS context. */
