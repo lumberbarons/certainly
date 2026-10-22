@@ -34,15 +34,11 @@ static int passes   = 0;
  * into the closed states a real exchange would leave it in. */
 void br_ssl_engine_fail(br_ssl_engine_context *rc, int err);
 
-/* ── Fake entropy (the real one reads Mac OS hardware state) ── */
+/* ── Entropy ──
+ * The real entropy.c runs; only the Mac OS inputs are absent. Contexts are
+ * created after a trusted seed is supplied, as the library requires. */
 
-void entropy_init(void) {}
-void entropy_add(const void *data, size_t len) { (void)data; (void)len; }
-void entropy_seed_engine(br_ssl_engine_context *eng)
-{
-    static const unsigned char seed[32] = { 1, 2, 3, 4, 5, 6, 7, 8 };
-    br_ssl_engine_inject_entropy(eng, seed, sizeof(seed));
-}
+void entropy_platform_gather(void) {}
 
 /* ── Scripted transport ── */
 
@@ -576,9 +572,21 @@ static void test_tls12(void)
     ctx = handshaking12();
     ctx->transport->ordRelReceived = true;
     ctx->sc.eng.shutdown_recv = 1;
+    ctx->tls12_established = true;
     st = run(ctx, got, sizeof(got));
     expect_end("1.2: send fails after close_notify", ctx, st, kMacTLS_Closed,
                kMacTLS_OK);
+    MacTLS_Close(ctx);
+
+    /* A close_notify before the handshake finished proves nothing */
+    scenario(END_FIN);
+    net.send_fails = 1;
+    ctx = handshaking12();
+    ctx->transport->ordRelReceived = true;
+    ctx->sc.eng.shutdown_recv = 1;
+    st = run(ctx, got, sizeof(got));
+    expect_end("1.2: close_notify before handshake completed", ctx, st,
+               kMacTLS_Error, kMacTLS_ErrTruncated);
     MacTLS_Close(ctx);
 
     /* A fatal alert received by the engine is reported as such */
@@ -622,7 +630,13 @@ static void test_tls12(void)
 
 int main(void)
 {
+    static const unsigned char seed[32] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+
     MacTLS_Init();
+    if (MacTLS_SeedTrusted(seed, sizeof(seed)) != kMacTLS_OK) {
+        printf("FAIL: could not seed entropy\n");
+        return 1;
+    }
     test_close_notify();
     test_plaintext_alert_rejected();
     test_fatal_and_malformed_alerts();

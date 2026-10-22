@@ -146,10 +146,10 @@ conformance-check: conformance-client
 # conformance client takes the same flags:
 #   make clean-client conformance-check EXTRA_CFLAGS="$(SAN_FLAGS)"
 asan:
-	rm -rf $(RECORD_TESTS) *.dSYM
-	$(MAKE) $(RECORD_TESTS) EXTRA_CFLAGS="$(SAN_FLAGS)"
-	for t in $(RECORD_TESTS); do ./$$t || exit 1; done
-	rm -rf $(RECORD_TESTS) *.dSYM
+	rm -rf $(RECORD_TESTS) test_closure *.dSYM
+	$(MAKE) $(RECORD_TESTS) test_closure EXTRA_CFLAGS="$(SAN_FLAGS)"
+	for t in $(RECORD_TESTS) test_closure; do ./$$t || exit 1; done
+	rm -rf $(RECORD_TESTS) test_closure *.dSYM
 
 test_http: test_http.c ../../examples/postman/http.c \
            ../../examples/postman/http.h
@@ -165,7 +165,7 @@ CLOSURE_SRCS = $(SRC)/certainly.c $(SRC)/entropy.c $(SRC)/tls13_handshake.c \
 
 test_closure: test_closure.c fake/OpenTransport.h $(CLOSURE_SRCS) \
               $(SRC)/certainly_internal.h $(BEARSSL_LIB)
-	$(CC) $(CFLAGS) -Ifake -I$(BEARSSL_INC) -I$(SRC) -I../../include \
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) -Ifake -I$(BEARSSL_INC) -I$(SRC) -I../../include \
 		-o $@ test_closure.c $(CLOSURE_SRCS) $(BEARSSL_LIB)
 
 clean:
