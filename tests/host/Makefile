@@ -56,7 +56,8 @@ ANVIL_ARGS ?=
 BEARSSL_TOOLS = ../../bearssl/tools
 
 .PHONY: all clean clean-client test asan conformance-client conformance-check \
-        conformance-anvil conformance-anvil-reference conformance-runner-check
+        conformance-anvil conformance-anvil-reference conformance-runner-check \
+        conformance-anvil-check-profile conformance-anvil-wide conformance-anvil-baseline
 
 all: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport test_closure
 
@@ -151,8 +152,21 @@ conformance-anvil:
 conformance-anvil-reference:
 	ANVIL_PYTHON="$(ANVIL_PYTHON)" $(CONF)/run-anvil.sh --backend openssl $(ANVIL_ARGS)
 
+# Wider TLS 1.3 profile: every failure is a nonzero exit.
+conformance-anvil-wide:
+	ANVIL_PYTHON="$(ANVIL_PYTHON)" $(CONF)/run-anvil.sh --profile wide $(ANVIL_ARGS)
+
+# Same profile, accepting only the exact failures recorded in baseline.json.
+conformance-anvil-baseline:
+	ANVIL_PYTHON="$(ANVIL_PYTHON)" $(CONF)/run-anvil.sh --profile wide --baseline $(ANVIL_ARGS)
+
+# Checks the wide profile accounts for every applicable suite template.
+conformance-anvil-check-profile:
+	ANVIL_PYTHON="$(ANVIL_PYTHON)" $(CONF)/run-anvil.sh --check-profile --profile wide $(ANVIL_ARGS)
+
 conformance-runner-check:
 	$(ANVIL_PYTHON) $(CONF)/test_controller.py
+	$(ANVIL_PYTHON) $(CONF)/test_reports.py
 
 # Rebuild and run the record tests with AddressSanitizer and UBSan. The
 # conformance client takes the same flags:

@@ -4,6 +4,7 @@
 Each suite invocation selects exactly one upstream test. Peer-observed TCP ports
 and case timestamps distinguish discovery and test connections after execution.
 Only upstream reports decide protocol verdicts; client exits validate the harness.
+A run executes a profile's tests one at a time and summarizes them with summarize.py.
 """
 
 import argparse
@@ -25,15 +26,32 @@ import threading
 import time
 import zipfile
 
+import summarize
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 OUT = ROOT / "build/conformance"
 POSITIVE = "8446-V3SF3rXAAW"
 NEGATIVE = "8446-dZhHUctEjQ"
+STRICT = "STRICTLY_SUCCEEDED"
+TEST_ID = re.compile(r"[A-Za-z0-9-]+")
+# Why an applicable template is deliberately not executed; each must be explained.
+EXCLUSION_KINDS = {"optional-feature", "harness-limitation", "upstream-disabled", "out-of-scope"}
+# Client outcomes a profile may declare expected for a named test; a connect error never is.
+TOLERABLE_OUTCOMES = {"timeout", "certificate-error"}
+VERDICT_COUNTERS = {"STRICTLY_SUCCEEDED": "StrictlySucceededTests",
+                    "CONCEPTUALLY_SUCCEEDED": "ConceptuallySucceededTests",
+                    "PARTIALLY_FAILED": "PartiallyFailedTests", "FULLY_FAILED": "FullyFailedTests"}
+# A broken environment fails every test alike; stop instead of spending a run on it.
+MAX_CONSECUTIVE_FAILURES = 5
 
 
 class HarnessError(Exception):
     pass
+
+
+class Interrupted(HarnessError):
+    """A signal arrived; unlike a failed test, this ends the whole run."""
 
 
 def write_json(path, value):
@@ -64,10 +82,10 @@ def stop_process(process):
     process.wait(timeout=2)
 
 
-def command(args, **kwargs):
+def command(args, timeout=60, **kwargs):
     try:
         result = subprocess.run(args, capture_output=True, text=True,
-                                timeout=60, **kwargs)
+                                timeout=timeout, **kwargs)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise HarnessError(f"cannot execute {args[0]}: {error}") from error
     if result.returncode:
@@ -269,8 +287,15 @@ def trigger():
     return 0
 
 
-def validate_reports(directory, test_id):
-    """Require complete, nonempty reports; Java's process exit is insufficient."""
+def validate_reports(directory, test_id, allow_inapplicable=False, allow_discovery_only=False):
+    """Require complete, nonempty reports; Java's process exit is insufficient.
+
+    The suite itself marks a template DISABLED, with a reason, when the client
+    under test lacks what it needs. That is only a result where the caller
+    accepts inapplicable tests; a smoke test that is disabled proved nothing.
+
+    Some templates judge the ClientHello captured during discovery and open no
+    connection, so they have a verdict and no cases. That also needs permission."""
     reports = list(directory.glob("report.json"))
     if len(reports) != 1:
         raise HarnessError("missing or ambiguous suite report")
@@ -281,6 +306,24 @@ def validate_reports(directory, test_id):
     test = json.loads(test_file.read_text())
     if not isinstance(report, dict) or not isinstance(test, dict):
         raise HarnessError("suite reports must be JSON objects")
+    inapplicable = allow_inapplicable and test.get("Result") == "DISABLED"
+    if inapplicable:
+        if report.get("Running") is not False or report.get("TotalTests") != 1 or \
+                report.get("FinishedTests") != 1 or report.get("DisabledTests") != 1 or \
+                report.get("TestCaseCount") != 0 or report.get("TestSuiteErrorTests", 0):
+            raise HarnessError("incomplete or inconsistent report for an inapplicable test")
+        if test.get("TestId") != test_id or test.get("TestCases") != [] or test.get("CaseCount") != 0 \
+                or not str(test.get("DisabledReason") or "").strip():
+            raise HarnessError("inapplicable test has cases or no reason")
+        return report, test
+    counter = VERDICT_COUNTERS.get(test.get("Result"))
+    if allow_discovery_only and counter and test.get("TestCases") == [] and test.get("CaseCount") == 0:
+        if report.get("Running") is not False or report.get("TotalTests") != 1 or \
+                report.get("FinishedTests") != 1 or report.get("TestCaseCount") != 0 or \
+                report.get(counter) != 1 or report.get("TestSuiteErrorTests", 0) or \
+                test.get("TestId") != test_id:
+            raise HarnessError("incomplete or inconsistent report for a discovery-evaluated test")
+        return report, test
     if report.get("Running") is not False or report.get("TotalTests") != 1 or \
             report.get("FinishedTests") != 1 or report.get("TestCaseCount", 0) < 1:
         raise HarnessError("incomplete or empty suite execution")
@@ -308,6 +351,8 @@ def verify_stage(backend, test_id, attempts):
             result = attempt["result"]
             if result.get("tls12_fallback_attempted") or result.get("tls_version") == "1.2":
                 problems.append(f"{attempt['attempt']}: TLS 1.2 fallback during a TLS 1.3 test")
+            if result.get("outcome") == "certificate-error" and result.get("tls13_state") != "RecvCertificate":
+                problems.append(f"{attempt['attempt']}: certificate rejected after the Certificate message")
             if test_id == POSITIVE and (result.get("tls_version") != "1.3" or
                                        result.get("bytes_sent", 0) == 0):
                 problems.append(f"{attempt['attempt']}: valid TLS 1.3 data exchange not reached")
@@ -323,11 +368,14 @@ def verify_stage(backend, test_id, attempts):
     return problems
 
 
-def correlate(test, attempts):
+def correlate(test, attempts, tolerate=()):
     """Use peer-observed TCP ports, then case time windows for extra connections.
 
     Trigger arguments and console log flushing provide no reliable case ID.
     Every peer-reported case must have an unambiguous owned client connection.
+    A client that timed out or rejected the certificate is a harness failure unless
+    the profile declares that outcome expected for this test, because a broken
+    fixture looks exactly like a correct rejection.
     """
     for attempt in attempts:
         attempt.update(phase="discovery", test_id=None, case_ids=[])
@@ -347,12 +395,15 @@ def correlate(test, attempts):
         if attempt.get("watchdog_timeout") or attempt.get("superseded") or attempt.get("log_error"):
             raise HarnessError(f"{attempt['attempt']}: incomplete or timed-out client")
         result = attempt.get("result", {})
-        if result.get("outcome") in ("timeout", "connect-error", "certificate-error"):
-            raise HarnessError(f"{attempt['attempt']}: {result['outcome']}")
+        outcome = result.get("outcome")
+        if outcome in ("timeout", "connect-error", "certificate-error") and \
+                (outcome == "connect-error" or outcome not in tolerate):
+            raise HarnessError(f"{attempt['attempt']}: {outcome}")
     return executed
 
 
-def run_test(args, lock, jar, anchors, run, test_id):
+def run_test(args, lock, jar, anchors, run, test_id, allow_inapplicable=False,
+             allow_discovery_only=False, tolerate=()):
     directory = run / test_id
     directory.mkdir()
     (directory / "payload.txt").write_text("certainly conformance payload\n")
@@ -404,18 +455,174 @@ def run_test(args, lock, jar, anchors, run, test_id):
                 stop_process(process)
             if attempts.errors:
                 raise HarnessError("; ".join(attempts.errors[:8]))
-    report, test = validate_reports(raw, test_id)
-    executed = correlate(test, attempts.records)
+    report, test = validate_reports(raw, test_id, allow_inapplicable, allow_discovery_only)
+    executed = correlate(test, attempts.records, tolerate)
     (directory / "attempts.jsonl").write_text(
         "".join(json.dumps(attempt) + "\n" for attempt in attempts.records))
-    if not executed:
+    if test["Result"] == "DISABLED":
+        write_json(directory / "evidence.json", {"test_id": test_id, "errors": []})
+        print(f"{test_id}: inapplicable ({test['DisabledReason']}); {directory}", flush=True)
+        return {"test_id": test_id, "verdict": "DISABLED", "cases": 0, "evidence_errors": []}
+    discovery_only = not test["TestCases"]
+    if not executed and not discovery_only:
         raise HarnessError(f"{test_id}: no correlated test attempts")
     verdict = test["Result"]
     evidence_errors = verify_stage(args.backend, test_id, executed)
     write_json(directory / "evidence.json", {"test_id": test_id, "errors": evidence_errors})
     print(f"{test_id}: {verdict} ({len(executed)} attempts); {directory}", flush=True)
-    return {"test_id": test_id, "verdict": verdict, "cases": report["TestCaseCount"],
-            "evidence_errors": evidence_errors}
+    result = {"test_id": test_id, "verdict": verdict, "cases": report["TestCaseCount"],
+              "evidence_errors": evidence_errors}
+    if discovery_only:
+        result["discovery_only"] = True
+    return result
+
+
+def check_port(port):
+    """Fail early and by number if something already answers on the suite's port.
+
+    Connecting, rather than binding, sees a listener on any local address and
+    ignores a previous run's TIME_WAIT entries, which the suite can reuse."""
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+    except OSError:
+        return
+    raise HarnessError(f"port {port} is not available: something is already listening")
+
+
+def validate_profile(profile):
+    """Reject a profile that could silently drop, duplicate or mislabel a test."""
+    ids = profile.get("testIds") if isinstance(profile, dict) else None
+    if not isinstance(ids, list) or not ids or len(set(ids)) != len(ids) or \
+            any(not isinstance(i, str) or not TEST_ID.fullmatch(i) for i in ids):
+        raise HarnessError("profile needs a nonempty list of unique test IDs")
+    excluded = profile.get("excluded", [])
+    if not isinstance(excluded, list):
+        raise HarnessError("profile exclusions must be a list")
+    excluded_ids = []
+    for row in excluded:
+        if not isinstance(row, dict) or row.get("kind") not in EXCLUSION_KINDS or \
+                not isinstance(row.get("id"), str) or not TEST_ID.fullmatch(row["id"]) or \
+                not str(row.get("reason") or "").strip():
+            raise HarnessError(f"profile exclusion needs an ID, a known kind and a reason: {row}")
+        excluded_ids.append(row["id"])
+    if len(set(excluded_ids)) != len(excluded_ids) or set(excluded_ids) & set(ids):
+        raise HarnessError("a test is both executed and excluded, or excluded twice")
+    for name, category in (profile.get("categories") or {}).items():
+        if not isinstance(category, dict) or not set(category.get("tests", [])) <= set(ids) or \
+                not set(category.get("excluded", [])) <= set(excluded_ids):
+            raise HarnessError(f"category {name!r} names a test the profile does not list")
+    tolerated = profile.get("tolerateOutcomes", {})
+    if not isinstance(tolerated, dict) or any(
+            test_id not in ids or not isinstance(outcomes, list) or not set(outcomes) <= TOLERABLE_OUTCOMES
+            for test_id, outcomes in tolerated.items()):
+        raise HarnessError("tolerateOutcomes must map executed test IDs to timeout/certificate-error lists")
+    for flag in ("allowInapplicable", "allowDiscoveryOnly"):
+        if not isinstance(profile.get(flag, False), bool):
+            raise HarnessError(f"{flag} must be true or false")
+    for row in profile.get("uncovered", []):
+        if not isinstance(row, dict) or not row.get("category") or not str(row.get("reason") or "").strip():
+            raise HarnessError("an uncovered category needs a name and a reason")
+
+
+def load_profile(name):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+        raise HarnessError(f"invalid profile name: {name!r}")
+    path = HERE / "profiles" / f"{name}.json"
+    if not path.is_file():
+        raise HarnessError(f"unknown profile: {name}")
+    profile = json.loads(path.read_text())
+    validate_profile(profile)
+    return dict(profile, name=name), digest(path)
+
+
+def tls_versions(row):
+    """The TLS versions a template declares; a method's list replaces its class's."""
+    text = row.get("method_tls_version") or row.get("class_tls_version") or ""
+    return set(re.findall(r"\b(D?TLS1[23])\b", text))
+
+
+def applicable_tls13_client(rows):
+    """Compiled templates that can run against a TLS 1.3 client under test."""
+    return [row for row in rows
+            if any(f".tests.{side}." in row["class"] for side in ("client", "both"))
+            and "TLS13" in tls_versions(row)
+            and not ("ServerTest" in row["class_annotations"] + row["method_annotations"]
+                     and "ClientTest" not in row["class_annotations"] + row["method_annotations"])]
+
+
+def check_inventory(rows, profile):
+    """Every applicable template must be executed or explained; nothing may be implied."""
+    applicable = {row["id"] for row in applicable_tls13_client(rows)}
+    compiled = {row["id"] for row in rows}
+    executed = set(profile["testIds"])
+    excluded = {row["id"]: row for row in profile.get("excluded", [])}
+    classified = executed | set(excluded)
+    kinds = {}
+    for row in excluded.values():
+        kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
+    report = {"compiled": len(compiled), "applicable": len(applicable),
+              "executed": len(executed & applicable), "excluded": len(set(excluded) & applicable),
+              "excluded_by_kind": kinds,
+              "unclassified": sorted(applicable - classified),
+              "unknown": sorted(i for i in classified if i not in compiled),
+              "not_applicable": sorted(i for i in classified & compiled if i not in applicable),
+              "uncovered": [row["category"] for row in profile.get("uncovered", [])]}
+    report["ok"] = not (report["unclassified"] or report["unknown"] or report["not_applicable"])
+    return report
+
+
+def execute(args, lock, jar, anchors, run, test_ids, allow_inapplicable=False,
+            allow_discovery_only=False, tolerate=None):
+    """Run each test in order. A failed test is recorded and costs only itself."""
+    deadline = time.monotonic() + args.total_timeout
+    results = []
+    consecutive = 0
+    stop = None
+    for test_id in test_ids:
+        if stop is None and time.monotonic() >= deadline:
+            stop = "total deadline exceeded"
+        if stop is not None:
+            results.append({"test_id": test_id, "harness_error": f"not run: {stop}"})
+            continue
+        try:
+            results.append(run_test(args, lock, jar, anchors, run, test_id,
+                                    allow_inapplicable=allow_inapplicable,
+                                    allow_discovery_only=allow_discovery_only,
+                                    tolerate=set((tolerate or {}).get(test_id, ()))))
+            consecutive = 0
+        except Interrupted as error:
+            results.append({"test_id": test_id, "harness_error": str(error)})
+            stop = "run interrupted"
+        except (HarnessError, OSError, ValueError, KeyError, TypeError) as error:
+            print(f"anvil: harness failure: {test_id}: {error}", file=sys.stderr, flush=True)
+            results.append({"test_id": test_id, "harness_error": str(error)})
+            consecutive += 1
+            if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                stop = f"aborted after {consecutive} consecutive harness failures"
+    return results
+
+
+def run_inventory(args, lock, jar):
+    """Compare the suite's compiled templates with the profile; no client is run."""
+    profile, _ = load_profile(args.profile)
+    OUT.mkdir(parents=True, exist_ok=True)
+    destination = Path(tempfile.mkdtemp(prefix="inventory-", dir=OUT)) / "inventory.json"
+    classpath = str(jar) + os.pathsep + str(jar.parent / "lib/*")
+    command([args.java, "--class-path", classpath, str(HERE / "fixtures/AnvilInventory.java"),
+             str(jar), str(destination)], timeout=300,  # compiles the helper and loads every suite class
+            cwd=destination.parent)  # the suite's loggers write to cwd
+    report = check_inventory(json.loads(destination.read_text()), profile)
+    print(f"Inventory: {report['compiled']} compiled templates, {report['applicable']} applicable "
+          f"to a TLS 1.3 client; {report['executed']} executed, {report['excluded']} excluded "
+          f"{report['excluded_by_kind']}; inventory file {destination}")
+    for key, title in (("unclassified", "applicable but neither executed nor excluded"),
+                       ("unknown", "named by the profile but absent from the suite"),
+                       ("not_applicable", "named by the profile but not a TLS 1.3 client template")):
+        for test_id in report[key]:
+            print(f"  {title}: {test_id}", file=sys.stderr)
+    if report["uncovered"]:
+        print(f"Uncovered categories: {', '.join(report['uncovered'])}")
+    return report
 
 
 def main():
@@ -424,28 +631,48 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fetch", action="store_true", help="download the pinned release if missing")
     parser.add_argument("--archive", help="use a local release ZIP (checksum still verified)")
-    parser.add_argument("--test", help="run one exact upstream test ID instead of smoke")
+    parser.add_argument("--profile", default="smoke",
+                        help="profile in tests/conformance/profiles/ to run (default: smoke)")
+    parser.add_argument("--test", help="run one exact upstream test ID instead of a profile")
+    parser.add_argument("--check-profile", action="store_true",
+                        help="check that the profile accounts for every applicable suite template; runs no client")
+    parser.add_argument("--baseline", nargs="?", const=str(HERE / "baseline.json"), metavar="FILE",
+                        help="accept only the exact known protocol failures recorded in FILE "
+                             "(default: baseline.json) instead of failing on any")
     parser.add_argument("--backend", choices=["certainly", "openssl"], default="certainly")
     parser.add_argument("--java", default=os.environ.get("JAVA", "java"))
     parser.add_argument("--openssl", default=os.environ.get("OPENSSL", "openssl"))
     parser.add_argument("--client", type=Path, default=OUT / "certainly_client")
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--attempt-timeout", type=float, default=8)
-    parser.add_argument("--suite-timeout", type=float, default=600)
+    parser.add_argument("--suite-timeout", type=float, default=600,
+                        help="limit for each selected test")
+    parser.add_argument("--total-timeout", type=float, default=7200,
+                        help="limit for the whole run; later tests are recorded as not run")
     args = parser.parse_args()
     installation = None
     run = None
     try:
         if sys.version_info < (3, 11):
             raise HarnessError("Python 3.11+ is required; set ANVIL_PYTHON=python3.12")
-        if not all(math.isfinite(n) and n >= 1 for n in (args.attempt_timeout, args.suite_timeout)) \
+        if not all(math.isfinite(n) and n >= 1 for n in (args.attempt_timeout, args.suite_timeout,
+                                                          args.total_timeout)) \
                 or not 0 < args.port < 65536:
             raise HarnessError("invalid deadline or port")
+        if args.check_profile and (args.test or args.baseline):
+            raise HarnessError("--check-profile runs nothing; it cannot be combined with --test or --baseline")
         lock = json.loads((HERE / "anvil.lock").read_text())
+        profile = profile_sha = None
+        if args.test is None:
+            profile, profile_sha = load_profile(args.profile)
+        baseline = summarize.load_baseline(args.baseline) if args.baseline else None
         version = command([args.java, "-version"])
         match = re.search(r'version "(\d+)', version)
         if not match or int(match[1]) < lock["java_min"]:
             raise HarnessError(f"Java {lock['java_min']}+ required: {version.strip()}")
+        if args.check_profile:
+            installation, jar = suite_install(args, lock)
+            return 0 if run_inventory(args, lock, jar)["ok"] else 1
         if args.backend == "certainly":
             build_log = command(["make", "-C", str(ROOT / "tests/host"), "conformance-client"])
             args.client = args.client.resolve()
@@ -457,8 +684,7 @@ def main():
             if "OpenSSL" not in openssl_version or any(flag not in help_text for flag in
                     ("-tls1_3", "-ciphersuites", "-verify_hostname", "-bind", "-attime")):
                 raise HarnessError("reference client requires OpenSSL 1.1.1+ with TLS 1.3 and -bind")
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", args.port))
+        check_port(args.port)
         installation, jar = suite_install(args, lock)
         runs = OUT / "anvil-runs"
         runs.mkdir(parents=True, exist_ok=True)
@@ -467,10 +693,16 @@ def main():
         shutil.copy(HERE / "anvil.lock", run / "anvil.lock")
         if args.backend == "certainly":
             (run / "build.log").write_text(build_log)
+        status = command(["git", "status", "--porcelain"], cwd=ROOT)
         metadata = {"suite": lock, "backend": args.backend, "java": version,
                     "revision": command(["git", "rev-parse", "HEAD"], cwd=ROOT).strip(),
-                    "dirty": bool(command(["git", "status", "--porcelain"], cwd=ROOT).strip()),
-                    "client_sha256": digest(args.client) if args.backend == "certainly" else None}
+                    "dirty": bool(status.strip()),
+                    "dirty_paths": [line[3:] for line in status.splitlines()],
+                    "client_sha256": digest(args.client) if args.backend == "certainly" else None,
+                    "profile": {"name": profile["name"] if profile else None, "sha256": profile_sha},
+                    "invocation": {"backend": args.backend, "port": args.port,
+                                   "attempt_timeout": args.attempt_timeout,
+                                   "suite_timeout": args.suite_timeout}}
         if args.backend == "openssl":
             metadata["openssl"] = openssl_version
         anchors = run / "anchors.pem"
@@ -482,22 +714,32 @@ def main():
         metadata["anchors_sha256"] = digest(anchors)
         metadata["peer_config_sha256"] = digest(run / "peer-config.xml")
         write_json(run / "inputs.json", metadata)
-        smoke = json.loads((HERE / "profiles/smoke.json").read_text())["testIds"]
-        selected = [args.test] if args.test is not None else smoke
-        if not selected or any(not re.fullmatch(r"[A-Za-z0-9-]+", test) for test in selected):
+        if profile:
+            write_json(run / "profile.json", profile)
+        selected = [args.test] if args.test is not None else profile["testIds"]
+        if not selected or any(not TEST_ID.fullmatch(test) for test in selected):
             raise HarnessError("empty or invalid test selection")
-        results = []
-        for test in selected:
-            results.append(run_test(args, lock, jar, anchors, run, test))
-        failed = any(result["verdict"] != "STRICTLY_SUCCEEDED" or result["evidence_errors"]
-                     for result in results)
-        write_json(run / "result.json", {"status": "protocol-failure" if failed else "passed", "tests": results})
-        for result in results:
-            for problem in result["evidence_errors"][:3]:
-                print(f"anvil: evidence rejected: {problem}", file=sys.stderr)
-        print(f"anvil: {'FAILED' if failed else 'PASSED'}; {run / 'result.json'}", flush=True)
-        return 1 if failed else 0
-    except (HarnessError, OSError, ValueError, KeyError, TypeError) as error:
+        # A single ad hoc test, or a profile that says so, may be inapplicable to this client.
+        adhoc = args.test is not None
+        results = execute(args, lock, jar, anchors, run, selected,
+                          allow_inapplicable=adhoc or bool(profile.get("allowInapplicable")),
+                          allow_discovery_only=adhoc or bool(profile.get("allowDiscoveryOnly")),
+                          tolerate=None if adhoc else profile.get("tolerateOutcomes"))
+        index = {"tests": results, "excluded": profile.get("excluded", []) if profile else []}
+        write_json(run / "result.json", dict(index, status="summarizing"))
+        summary = summarize.summarize(run)
+        comparison = summarize.compare(summary, baseline) if baseline else None
+        code = summarize.exit_code(summary, comparison)
+        write_json(run / "result.json", dict(index, status=("passed", "protocol-failure", "harness-failure")[code],
+                                             mode="baseline" if baseline else "strict"))
+        write_json(run / "summary.json", {"summary": summary, "comparison": comparison})
+        text = summarize.render(summary, comparison)
+        (run / "summary.txt").write_text(text)
+        print(summarize.render(summary, comparison, brief=True), end="")
+        print(f"anvil: {'PASSED' if code == 0 else 'FAILED'}; {run / 'summary.txt'}", flush=True)
+        return code
+    except (HarnessError, summarize.SummaryError, summarize.BaselineError, OSError, ValueError,
+            KeyError, TypeError) as error:
         print(f"anvil: harness failure: {error}", file=sys.stderr)
         if run:
             write_json(run / "result.json", {"status": "harness-failure", "error": str(error)})
@@ -509,7 +751,7 @@ def main():
 
 if __name__ == "__main__":
     def interrupted(signum, _frame):
-        raise HarnessError(f"interrupted by signal {signum}")
+        raise Interrupted(f"interrupted by signal {signum}")
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     sys.exit(main())

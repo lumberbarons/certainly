@@ -57,7 +57,8 @@ ANVIL_PYTHON=python3.12 tests/conformance/run-anvil.sh --test 8446-dZhHUctEjQ
 
 Single-test mode still performs client discovery. It supports handshake
 tests compatible with this fixed fixture and send-only client lifecycle;
-post-handshake and certificate-variation coverage is a later milestone.
+certificate-variation templates cannot work with it and are excluded from the
+wider profile. A template the suite marks inapplicable is reported as such.
 The smoke selection is [profiles/smoke.json](profiles/smoke.json):
 
 | Upstream ID | What it establishes |
@@ -67,7 +68,8 @@ The smoke selection is [profiles/smoke.json](profiles/smoke.json):
 
 Both run serially with strength 1, one active handshake, and one selected
 test template per suite invocation. Each template can generate multiple
-cases and connections. A wider inventory or baseline is not included here.
+cases and connections. The wider profile and the baseline are described
+under [Wider profile and baseline](#wider-profile-and-baseline).
 
 ### Verified pinned contract
 
@@ -167,6 +169,124 @@ Pinned sources for this contract:
 [valid test](https://github.com/tls-attacker/TLS-Anvil/blob/e9e9ac7160789d66736d36f3bc62430f6a49d497/TLS-Testsuite/src/main/java/de/rub/nds/tlstest/suite/tests/both/tls13/rfc8446/RecordProtocol.java),
 [negative test](https://github.com/tls-attacker/TLS-Anvil/blob/e9e9ac7160789d66736d36f3bc62430f6a49d497/TLS-Testsuite/src/main/java/de/rub/nds/tlstest/suite/tests/both/tls13/rfc8446/Finished.java).
 
+### Wider profile and baseline
+
+[profiles/wide.json](profiles/wide.json) selects the pinned suite's TLS 1.3
+templates that apply to a client. Anything that is not run is listed with a
+kind and a reason, and the categories below are declared, not inferred:
+
+| Run with | What it does |
+|---|---|
+| `run-anvil.sh --profile wide` | **Strict run.** Exits nonzero on any protocol failure or harness failure. |
+| `run-anvil.sh --profile wide --baseline` | **Baseline comparison.** Accepts only the exact failures recorded in [baseline.json](baseline.json). |
+| `run-anvil.sh --check-profile --profile wide` | Checks the profile against the suite's compiled templates; runs no client. |
+| `make -C tests/host conformance-anvil-wide`, `conformance-anvil-baseline`, `conformance-anvil-check-profile` | The same, from `tests/host`. |
+
+The profile check lists the compiled templates from the pinned JAR
+(`fixtures/AnvilInventory.java`) and fails if an applicable template is
+neither executed nor excluded, or if the profile names one the suite does not
+have. A new suite pin therefore cannot silently change what is covered. Whether
+a template actually applies to Certainly is decided by the suite at run time
+from its live feature scan; those it rejects are reported as inapplicable with
+the suite's own reason.
+
+#### Categories
+
+`categories` in the profile groups executed templates under the protocol areas
+the milestone cares about: negotiation, extensions and HelloRetryRequest,
+record layer and fragmentation, record authentication, certificate
+authentication and Finished, alerts and closure, post-handshake messages, and
+the handshake state machine. A category counts as covered only when at least
+one of its templates produced an upstream verdict. One whose templates are all
+inapplicable, excluded or failed by the harness is printed as uncovered, next to
+the areas the profile declares uncovered with a reason. Read the summary's
+uncovered list before treating a green run as broad evidence.
+
+#### Result classes
+
+Every summary keeps these apart, and upstream verdicts are copied verbatim:
+
+| Class | Meaning |
+|---|---|
+| `passed` | Upstream `STRICTLY_SUCCEEDED`, stage evidence accepted, no TLS 1.2 fallback. |
+| `protocol-failure` | Any other upstream verdict (conceptual success counts), rejected stage evidence, or a TLS 1.2 fallback in a TLS 1.3 test. The cases that failed are listed with their parameters. |
+| `inapplicable` | The suite marked the template `DISABLED` and gave a reason, usually a feature Certainly does not offer. Not a pass: it verified nothing. |
+| `harness-failure` | Setup, correlation, timeout or report problem. Never accepted by a baseline, and never evidence about the library. |
+| `excluded` | Applicable but deliberately not run; the profile records why. |
+
+Exclusion kinds are `optional-feature`, `harness-limitation`, `out-of-scope`
+and `upstream-disabled`. A mandatory behaviour is never an exclusion: `KeyUpdate`
+handling stays in the profile and in the baseline as a protocol defect.
+
+A run where no template produced a verdict exits with the harness status even if
+everything was inapplicable. Some templates, such as the ClientHello content
+checks, judge the ClientHello captured during discovery and open no connection;
+they are reported with `discovery_only` and zero cases, and only a profile that
+sets `allowDiscoveryOnly` accepts them.
+
+A profile can also name, per test, a client outcome that is expected for that
+test (`tolerateOutcomes`): a certificate rejection for a template that sends an
+empty certificate list, or a timeout where staying silent is the defect. Without
+that declaration, a certificate error or timeout fails the harness, since a
+broken fixture looks the same as a correct rejection. A tolerated certificate
+rejection must still happen at the Certificate message. Connection errors are
+never tolerated.
+
+#### Baseline
+
+[baseline.json](baseline.json) records the protocol defects observed against
+the pinned suite revision, each with the upstream verdict, the evidence seen,
+and an explanation. Only `protocol-defect` entries are valid. In comparison
+mode:
+
+- a failure that matches an entry exactly (test and verdict) is accepted and
+  always listed as a known protocol failure;
+- the client behaviour must match too: each entry records a `signature`, the
+  outcomes, handshake states and BearSSL errors seen across the test's cases
+  (for example `success/Complete/None`, or `handshake-error/Complete/BR_ERR_UNEXPECTED`).
+  The same verdict reached a different way is a changed outcome and fails, so a
+  known failure cannot hide a different one. Case counts and parameters are not
+  recorded: the suite samples them differently each run;
+- a new failure, a verdict worse than recorded, rejected stage evidence or any
+  harness failure fails the run;
+- the tests the suite marks inapplicable are recorded under `inapplicable`. A test
+  that becomes inapplicable and is not listed fails the run, because coverage
+  that disappears is a regression, including for a known failure. A listed test
+  that now runs is flagged for review;
+- an entry that now passes, or fails less severely, is listed under
+  *improvements to review*, and an entry whose test was not executed or became
+  inapplicable is listed as *stale*. Neither fails the run, but both should lead
+  to an edit of the baseline in the same change;
+- a baseline recorded for a different suite revision fails the run.
+
+Exit codes stay **0** (green), **1** (protocol failure or baseline mismatch) and
+**2** (harness failure). A defect that is fixed should be deleted from the
+baseline, not left to go stale. The baseline is evidence from one revision of the
+code and one fixture; it does not describe other revisions.
+
+#### Reproducing one failure
+
+Every protocol or harness failure in the summary carries its reproduction
+command, which reruns that upstream template alone with the same backend, port
+and deadlines:
+
+```sh
+tests/conformance/run-anvil.sh --test 8446-J6tVdjJCzF
+```
+
+The pinned suite selects whole templates, not single parameter combinations, so
+the rerun regenerates every case of the template. The summary lists the failing
+cases with their parameters and attempt IDs; the per-attempt client logs in the
+run directory show the stage each one reached. `summarize.py RUN_DIR
+[--baseline]` rebuilds the summary and comparison from a retained run without
+running anything.
+
+Each run directory also holds `summary.json` and `summary.txt`, beside the
+unchanged raw reports. The summary names the exact test IDs, suite revision,
+source revision (and whether the tree was dirty, with the paths), client binary,
+fixture and profile fingerprints, TLS versions seen, client outcomes, and the
+errors that decided each classification.
+
 ### Where the adapter differs from Open Transport
 
 - The destination must be an IP literal; there is no DNS.
@@ -187,6 +307,10 @@ All from `tests/host/`; nothing here needs Retro68.
 make test                  # existing unit tests plus the adapter contract test
 make conformance-client    # builds ../../build/conformance/certainly_client
 make conformance-check     # proves the client against controlled peers
+make conformance-runner-check   # summary, baseline and runner unit tests; no Java needed
+make conformance-anvil-wide     # wide TLS 1.3 profile; any failure is nonzero
+make conformance-anvil-baseline # same, accepting only recorded known failures
+make conformance-anvil-check-profile # profile accounts for every applicable template
 ```
 
 For the sanitizers, rebuild the client with the same flags the record

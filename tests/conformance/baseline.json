@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "suite_revision": "e9e9ac7160789d66736d36f3bc62430f6a49d497",
+  "profile": "wide",
+  "recorded": "2026-10-22",
+  "known_failures": [
+    {
+      "test_id": "8446-2R6GNvoUEs",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "RecordLayer.zeroLengthRecord_Finished",
+      "signature": [
+        "success/Complete/None"
+      ],
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 5.1: a zero-length handshake record must end the connection with unexpected_message. The record layer accepts it, so the handshake completes."
+    },
+    {
+      "test_id": "8446-6dvAUhLdUW",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "Extensions.sendHeartBeatExtensionInSH",
+      "signature": [
+        "success/Complete/None"
+      ],
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 4.2: an extension not allowed in the message it appears in must abort the handshake with illegal_parameter. ServerHello extension handling ignores a heartbeat extension that the ClientHello did not offer."
+    },
+    {
+      "test_id": "8446-Dy4H1oQ8bc",
+      "verdict": "PARTIALLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "KeyUpdate.sendUnknownRequestMode",
+      "signature": [
+        "handshake-error/Complete/BR_ERR_UNEXPECTED"
+      ],
+      "evidence": "Client outcome handshake-error with BR_ERR_UNEXPECTED after the handshake completed, in every case. The suite fails the cases where it expects illegal_parameter.",
+      "explanation": "RFC 8446 section 4.6.3: an unknown request_update value must end the connection with illegal_parameter. Certainly rejects every post-handshake KeyUpdate as unexpected, so it neither updates keys nor distinguishes invalid values. The verdict is partial because some cases accept closure in any form."
+    },
+    {
+      "test_id": "8446-J6tVdjJCzF",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "KeyUpdate.respondsWithValidKeyUpdate",
+      "signature": [
+        "handshake-error/Complete/BR_ERR_UNEXPECTED"
+      ],
+      "evidence": "Client outcome handshake-error with BR_ERR_UNEXPECTED after the handshake completed, in every case; the suite never received the expected KeyUpdate.",
+      "explanation": "RFC 8446 section 4.6.3: a receiver of update_requested must answer with its own KeyUpdate. KeyUpdate is mandatory to implement; src/tls13_handshake.c treats it as a connection close instead."
+    },
+    {
+      "test_id": "8446-U5uSdqYohP",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "EncryptedExtensions.sendPaddingExtensionInEE",
+      "signature": [
+        "success/Complete/None"
+      ],
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 4.3.1: the client must reject forbidden extensions in EncryptedExtensions with illegal_parameter. The EncryptedExtensions parser skips extensions it does not use without checking that they are permitted there."
+    },
+    {
+      "test_id": "8446-X68SWFRBVS",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "EncryptedExtensions.sendSupportedVersionsExtensionInEE",
+      "signature": [
+        "success/Complete/None"
+      ],
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 4.3.1: the client must reject forbidden extensions in EncryptedExtensions with illegal_parameter. A supported_versions extension there is accepted."
+    },
+    {
+      "test_id": "8446-bejcyb2cLf",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "ClientAuthentication.clientSendsCertificateAndFinMessage",
+      "signature": [
+        "success/Complete/None"
+      ],
+      "evidence": "Every failing case: the client completed the handshake without sending Certificate after a CertificateRequest; the suite received Finished directly (outcome success, TLS 1.3 state Complete).",
+      "explanation": "RFC 8446 section 4.4.2: when the server requests client authentication and no certificate is available, the client must send a Certificate message with no certificates before Finished. src/tls13_handshake.c notes the CertificateRequest and defers the empty Certificate reply. Client certificates themselves are out of scope; the empty reply is not."
+    },
+    {
+      "test_id": "8446-fFh7mHrXow",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "KeyUpdate.appDataUnderNewKeysSucceeds",
+      "signature": [
+        "handshake-error/Complete/BR_ERR_UNEXPECTED"
+      ],
+      "evidence": "Client outcome handshake-error with BR_ERR_UNEXPECTED after the handshake completed, in every case.",
+      "explanation": "RFC 8446 section 4.6.3: a receiver of KeyUpdate must update its receiving keys and keep exchanging data. Certainly closes the connection instead of rekeying."
+    },
+    {
+      "test_id": "8446-guYpWN18yk",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "Extensions.sendAdditionalExtension",
+      "signature": [
+        "success/Complete/None"
+      ],
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 4.2: an extension response with no matching request must abort the handshake with unsupported_extension. Unsolicited extensions are ignored."
+    },
+    {
+      "test_id": "8446-xhexdB876E",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "ComplianceRequirements.supportsSecp256r1",
+      "signature": [],
+      "evidence": "Discovery-evaluated: the suite's scan of the ClientHello found no secp256r1 key share or supported group; X25519 is the only group offered. No connection is made for this verdict.",
+      "explanation": "RFC 8446 section 9.1: a TLS-compliant application must support key exchange with secp256r1. The TLS 1.3 handshake implements X25519 only, which also leaves the suite's HelloRetryRequest templates inapplicable."
+    }
+  ],
+  "inapplicable": [
+    {
+      "test_id": "8446-2v6S87AwgY",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-34CYsV98Fs",
+      "reason": "Client does not support maximum fragment length"
+    },
+    {
+      "test_id": "8446-5NRGuXE3Em",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-6X9hLRk9V4",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-7byKPGEA8Q",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-BbKKCCtSdd",
+      "reason": "Target does not support Record fragmentation"
+    },
+    {
+      "test_id": "8446-FviCUju7gw",
+      "reason": "Target does not support more than one NamedGroup in TLS 1.3"
+    },
+    {
+      "test_id": "8446-KLkH56oYzC",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-LNoEKntfip",
+      "reason": "Client does not support legacy rsa signature and hash algorithms"
+    },
+    {
+      "test_id": "8446-QxfMDM9cBK",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-TyCkZKkVMt",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-TyxxKdqwv3",
+      "reason": "Target does not provide Ciphersuites that are supported by the test."
+    },
+    {
+      "test_id": "8446-XDu7chdPTM",
+      "reason": "Client does not support maximum fragment length"
+    },
+    {
+      "test_id": "8446-YMYRto48Jg",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-cck1BzgJ1h",
+      "reason": "Target does not provide Ciphersuites that are supported by the test."
+    },
+    {
+      "test_id": "8446-dyTnCEsFo1",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-eNP4DYhWjk",
+      "reason": "Target does not provide Ciphersuites that are supported by the test."
+    },
+    {
+      "test_id": "8446-f3pZavKkyP",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-i8hwrTotPM",
+      "reason": "Sender restrictions are not expected to be enforced"
+    },
+    {
+      "test_id": "8446-ncR52WSgGx",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-qN6nNMX9Sx",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-qNaBPZ4ofA",
+      "reason": "TLS 1.2 is not supported by the server."
+    },
+    {
+      "test_id": "8446-qibaoRRFDr",
+      "reason": "TLS 1.2 is not supported by the server."
+    },
+    {
+      "test_id": "8446-t4AtKzmU9J",
+      "reason": "PSKModeExtension is not supported"
+    },
+    {
+      "test_id": "8446-vU6BQin9Eo",
+      "reason": "Specific features required for the test have not been met by the SUT for derivation parameter NAMED_GROUP"
+    },
+    {
+      "test_id": "8446-w9k9gMLaeU",
+      "reason": "TLS 1.2 is not supported by the server."
+    }
+  ]
+}
