@@ -110,6 +110,24 @@ struct MacTLS_Config {
     const br_x509_trust_anchor *custom_tas;
     size_t                      custom_tas_count;
 
+    /*
+     * Socket destination, when it must differ from the host name given to
+     * MacTLS_Create*, which keeps driving SNI and certificate name checks.
+     * NULL connects to the TLS host name. Only the conformance harness
+     * (tests/conformance) sets this; it is not part of the public API.
+     */
+    const char                 *connect_host;
+
+    /*
+     * Fixed X.509 validation time (BearSSL convention: days since
+     * 0000-01-01, seconds since midnight). Without it BearSSL asks the OS
+     * clock, so fixtures would expire. Expiry is still checked against
+     * this time. Internal for the same reason as connect_host.
+     */
+    bool                        validation_time_set;
+    uint32_t                    validation_days;
+    uint32_t                    validation_seconds;
+
     /* TODO: add custom CA DER storage when MacTLS_ConfigAddCA is implemented */
 };
 
