@@ -1239,10 +1239,48 @@ static tls13_hs_result tls13_read_encrypted_hs(
 }
 
 /*
+ * RFC 8446 section 4.2: an extension may only appear in a message where it
+ * is allowed, only once, and only as an answer to one the client sent. Of
+ * the ClientHello extensions in tls13_build_client_hello(), only
+ * server_name and supported_groups are valid in EncryptedExtensions, so
+ * anything else is rejected rather than skipped. Keep this list in step
+ * with the ClientHello builder.
+ */
+static int tls13_encrypted_extensions_valid(const unsigned char *list,
+                                            size_t list_len)
+{
+    size_t pos = 0;
+    int seen_server_name = 0;
+    int seen_supported_groups = 0;
+
+    while (pos < list_len) {
+        uint16_t ext_type;
+        size_t ext_len;
+
+        if (list_len - pos < 4) return 0;
+        ext_type = get_u16(list + pos);
+        ext_len = get_u16(list + pos + 2);
+        if (list_len - pos - 4 < ext_len) return 0;
+
+        if (ext_type == TLS13_EXT_SERVER_NAME) {
+            if (seen_server_name) return 0;
+            seen_server_name = 1;
+        } else if (ext_type == TLS13_EXT_SUPPORTED_GROUPS) {
+            if (seen_supported_groups) return 0;
+            seen_supported_groups = 1;
+        } else {
+            return 0;
+        }
+        pos += 4 + ext_len;
+    }
+    return 1;
+}
+
+/*
  * Handle the kTLS13_RecvEncryptedExtensions state.
  *
- * Parse the EncryptedExtensions message. For our client, we silently
- * ignore all extensions (including early_data if present).
+ * Parse the EncryptedExtensions message and reject any extension that is
+ * not valid here or that we did not offer.
  *
  * Format:
  *   HandshakeType = 8 (encrypted_extensions)
@@ -1274,19 +1312,11 @@ static tls13_hs_result tls13_state_recv_encrypted_extensions(
         return kTLS13_Error;
     }
 
-    /*
-     * We silently ignore all extensions in EncryptedExtensions.
-     * Per the spec, we don't support early data or any extensions
-     * that would require processing here.
-     *
-     * Just verify the extensions list length field is consistent.
-     */
-    if (body_len >= 2) {
-        uint16_t ext_list_len = get_u16(hs->msg_buf + 4);
-        if (ext_list_len + 2 > body_len) {
-            hs->error = BR_ERR_BAD_PARAM;
-            return kTLS13_Error;
-        }
+    if (body_len < 2 ||
+        (size_t)get_u16(hs->msg_buf + 4) + 2 != body_len ||
+        !tls13_encrypted_extensions_valid(hs->msg_buf + 6, body_len - 2)) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
     }
 
     /* Update transcript hash with the full handshake message */
