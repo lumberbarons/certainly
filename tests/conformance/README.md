@@ -28,7 +28,7 @@ one, the client reports an entropy error and opens no socket.
 - The destination must be an IP literal; there is no DNS.
 - An orderly close is noticed once buffered data has been read; Open
   Transport raises its event as soon as the FIN arrives. The pump handles
-  both orders, but only this one is exercised natively.
+  either order, but only this one is exercised natively.
 - Timing, endianness, word size and compiler differ from the PowerPC build.
 
 `tests/host/test_host_transport.c` pins the adapter's contract: would-block
@@ -128,8 +128,8 @@ connection and byte counts, and whether a TLS 1.2 reconnect was attempted.
 Each rejection case runs beside a control that succeeds against the same
 fixture, so a rejection cannot be a broken fixture:
 
-- both advertised TLS 1.3 suites handshake, exchange an exact known payload,
-  and still do so with 1-byte transfers and injected would-block;
+- each advertised TLS 1.3 suite handshakes, exchanges an exact known payload,
+  and still does so with 1-byte transfers and injected would-block;
 - a multi-record download arrives intact, ended by a TLS close;
 - wrong server name, untrusted issuer, expired and not-yet-valid
   certificates are each rejected as `certificate-error` with the specific

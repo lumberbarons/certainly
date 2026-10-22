@@ -136,6 +136,13 @@ int ta_load_pem_file(const char *path, ta_set *out, char *err, size_t errlen)
         goto done;
     }
 
+    /* The decoder emits an object's end only after the footer's newline. */
+    bytes_append(&file, "\n", 1);
+    if (file.oom) {
+        snprintf(err, errlen, "out of memory");
+        goto done;
+    }
+
     br_pem_decoder_init(&pc);
     p = file.data;
     len = file.len;

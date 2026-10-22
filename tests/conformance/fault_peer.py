@@ -50,16 +50,30 @@ def await_client_hello(conn):
         pass
 
 
+def drain(sock):
+    """Discard unread bytes so closing sends FIN, not RST."""
+    sock.setblocking(False)
+    try:
+        while sock.recv(65536):
+            pass
+    except (BlockingIOError, ConnectionError):
+        pass
+
+
 def relay(client, upstream, until, how, deadline):
-    while time.monotonic() < until:
-        ready, _, _ = select.select([client, upstream], [], [], 0.02)
-        for src in ready:
-            dst = upstream if src is client else client
-            data = src.recv(65536)
-            if not data:
-                return
-            dst.sendall(data)
+    try:
+        while time.monotonic() < until:
+            ready, _, _ = select.select([client, upstream], [], [], 0.02)
+            for src in ready:
+                dst = upstream if src is client else client
+                data = src.recv(65536)
+                if not data:
+                    return
+                dst.sendall(data)
+    except ConnectionError:
+        return
     if how == "eof":
+        drain(client)
         client.shutdown(socket.SHUT_WR)
         client.close()
     elif how == "reset":

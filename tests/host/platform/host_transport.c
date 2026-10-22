@@ -14,7 +14,7 @@
  * Differences from OT: the destination must be an IP literal (no async
  * DNS), and an orderly close is only noticed once buffered data has been
  * read, where OT raises its event as soon as the FIN arrives. The pump
- * handles both orders.
+ * handles either order.
  */
 
 #define _POSIX_C_SOURCE 200809L

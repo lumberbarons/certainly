@@ -455,9 +455,15 @@ static void run_attempt(const options *o, attempt *at, MacTLS_Context *ctx,
     MacTLS_State last = (MacTLS_State)-1;
     unsigned char rbuf[4096];
 
+    /* A transport that fails inside create never reports Connecting. */
+    if (ctx->transport != NULL) at->phase = "connect";
+
     for (;;) {
         MacTLS_State st;
         int progress = 0;
+        const host_transport_stats *ts = host_transport_get_stats();
+        unsigned long activity = ts->bytes_sent + ts->bytes_received +
+                                 ts->wouldblocks_injected;
 
         if (host_monotonic_ms() >= deadline) {
             at->result = OUT_TIMEOUT;
@@ -572,7 +578,12 @@ static void run_attempt(const options *o, attempt *at, MacTLS_Context *ctx,
             return;
         }
 
-        if (!progress) nap();
+        /* Napping while bytes still move would turn 1-byte transfers into
+         * a deadline problem. */
+        if (!progress && activity == ts->bytes_sent + ts->bytes_received +
+                                         ts->wouldblocks_injected) {
+            nap();
+        }
     }
 }
 
