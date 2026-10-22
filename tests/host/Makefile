@@ -57,7 +57,7 @@ BEARSSL_TOOLS = ../../bearssl/tools
 
 .PHONY: all clean clean-client test asan conformance-client conformance-check \
         conformance-anvil conformance-anvil-reference conformance-runner-check \
-        conformance-anvil-inventory conformance-anvil-wide conformance-anvil-baseline
+        conformance-anvil-check-profile conformance-anvil-wide conformance-anvil-baseline
 
 all: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport test_closure
 
@@ -161,8 +161,8 @@ conformance-anvil-baseline:
 	ANVIL_PYTHON="$(ANVIL_PYTHON)" $(CONF)/run-anvil.sh --profile wide --baseline $(ANVIL_ARGS)
 
 # Checks the wide profile accounts for every applicable suite template.
-conformance-anvil-inventory:
-	ANVIL_PYTHON="$(ANVIL_PYTHON)" $(CONF)/run-anvil.sh --inventory --profile wide $(ANVIL_ARGS)
+conformance-anvil-check-profile:
+	ANVIL_PYTHON="$(ANVIL_PYTHON)" $(CONF)/run-anvil.sh --check-profile --profile wide $(ANVIL_ARGS)
 
 conformance-runner-check:
 	$(ANVIL_PYTHON) $(CONF)/test_controller.py

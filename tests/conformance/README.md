@@ -177,12 +177,12 @@ kind and a reason, and the categories below are declared, not inferred:
 
 | Run with | What it does |
 |---|---|
-| `run-anvil.sh --profile wide` | **Inventory run.** Exits nonzero on any protocol failure or harness failure. |
+| `run-anvil.sh --profile wide` | **Strict run.** Exits nonzero on any protocol failure or harness failure. |
 | `run-anvil.sh --profile wide --baseline` | **Baseline comparison.** Accepts only the exact failures recorded in [baseline.json](baseline.json). |
-| `run-anvil.sh --inventory --profile wide` | Checks the profile against the suite's compiled templates; runs no client. |
-| `make -C tests/host conformance-anvil-wide`, `conformance-anvil-baseline`, `conformance-anvil-inventory` | The same, from `tests/host`. |
+| `run-anvil.sh --check-profile --profile wide` | Checks the profile against the suite's compiled templates; runs no client. |
+| `make -C tests/host conformance-anvil-wide`, `conformance-anvil-baseline`, `conformance-anvil-check-profile` | The same, from `tests/host`. |
 
-The inventory check lists the compiled templates from the pinned JAR
+The profile check lists the compiled templates from the pinned JAR
 (`fixtures/AnvilInventory.java`) and fails if an applicable template is
 neither executed nor excluded, or if the profile names one the suite does not
 have. A new suite pin therefore cannot silently change what is covered. Whether
@@ -241,8 +241,18 @@ mode:
 
 - a failure that matches an entry exactly (test and verdict) is accepted and
   always listed as a known protocol failure;
+- the client behaviour must match too: each entry records a `signature`, the
+  outcomes, handshake states and BearSSL errors seen across the test's cases
+  (for example `success/Complete/None`, or `handshake-error/Complete/BR_ERR_UNEXPECTED`).
+  The same verdict reached a different way is a changed outcome and fails, so a
+  known failure cannot hide a different one. Case counts and parameters are not
+  recorded: the suite samples them differently each run;
 - a new failure, a verdict worse than recorded, rejected stage evidence or any
   harness failure fails the run;
+- the tests the suite marks inapplicable are recorded under `inapplicable`. A test
+  that becomes inapplicable and is not listed fails the run, because coverage
+  that disappears is a regression, including for a known failure. A listed test
+  that now runs is flagged for review;
 - an entry that now passes, or fails less severely, is listed under
   *improvements to review*, and an entry whose test was not executed or became
   inapplicable is listed as *stale*. Neither fails the run, but both should lead
@@ -300,7 +310,7 @@ make conformance-check     # proves the client against controlled peers
 make conformance-runner-check   # summary, baseline and runner unit tests; no Java needed
 make conformance-anvil-wide     # wide TLS 1.3 profile; any failure is nonzero
 make conformance-anvil-baseline # same, accepting only recorded known failures
-make conformance-anvil-inventory # profile accounts for every applicable template
+make conformance-anvil-check-profile # profile accounts for every applicable template
 ```
 
 For the sanitizers, rebuild the client with the same flags the record

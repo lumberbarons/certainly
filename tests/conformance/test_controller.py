@@ -405,6 +405,15 @@ class DiscoveryEvaluated(unittest.TestCase):
 
 
 class PortProbe(unittest.TestCase):
+    def test_listener_on_another_address_of_the_machine_is_busy_too(self):
+        import socket
+        with socket.socket() as busy:
+            busy.bind(("0.0.0.0", 0))
+            busy.listen(1)
+            port = busy.getsockname()[1]
+            with self.assertRaisesRegex(c.HarnessError, f"port {port}"):
+                c.check_port(port)
+
     def test_busy_port_is_reported_by_number(self):
         import socket
         with socket.socket() as busy:
@@ -426,6 +435,15 @@ class PortProbe(unittest.TestCase):
             connection.close()  # the side that closes first keeps the TIME_WAIT entry
             client.close()
         c.check_port(port)
+
+
+class CommandTimeout(unittest.TestCase):
+    def test_slow_command_honours_its_own_limit(self):
+        with self.assertRaisesRegex(c.HarnessError, "cannot execute"):
+            c.command([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.2)
+
+    def test_default_limit_still_allows_ordinary_commands(self):
+        self.assertIn("ok", c.command([sys.executable, "-c", "print('ok')"]))
 
 
 class Lifecycle(unittest.TestCase):

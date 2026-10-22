@@ -58,7 +58,7 @@ class Run:
         if attempts:
             rows = [{"attempt": f"run-{test_id}-{i}", "phase": "test", "test_id": test_id,
                      "case_ids": [f"U{i}"], "exit": 0,
-                     "result": {"outcome": "success", "tls_version": tls,
+                     "result": {"outcome": "success", "tls_version": tls, "tls13_state": "Complete",
                                 "tls12_fallback_attempted": fallback,
                                 "bearssl_error_name": "BR_ERR_OK"}} for i in range(cases)]
             rows.append({"attempt": "discovery", "phase": "discovery", "test_id": None,
@@ -143,6 +143,11 @@ class Classification(Base):
     def test_tls_versions_come_from_test_attempts_not_discovery(self):
         self.builder.test("T-pass")
         self.assertEqual(self.by_id(self.summary())["T-pass"]["tls_versions"], ["1.3"])
+
+    def test_client_behaviour_signature_comes_from_test_attempts_only(self):
+        self.builder.test("T-pass", cases=2)
+        self.assertEqual(self.by_id(self.summary())["T-pass"]["signature"],
+                         ["success/Complete/BR_ERR_OK"])
 
     def test_report_metadata_is_retained(self):
         self.builder.test("T-pass", cls="x.tests.both.tls13.rfc8446.Finished", method="verify")
@@ -264,12 +269,16 @@ class Coverage(Base):
         self.assertIn("alerts", [row["category"] for row in summary["coverage"]["uncovered"]])
 
 
-def baseline(*failures, revision=REVISION):
-    return {"version": 1, "suite_revision": revision, "known_failures": list(failures)}
+SIGNATURE = ["success/Complete/BR_ERR_OK"]
 
 
-def known(test_id, verdict=FULL, kind="protocol-defect"):
-    return {"test_id": test_id, "verdict": verdict, "kind": kind,
+def baseline(*failures, revision=REVISION, inapplicable=()):
+    return {"version": 1, "suite_revision": revision, "known_failures": list(failures),
+            "inapplicable": [{"test_id": i, "reason": "recorded"} for i in inapplicable]}
+
+
+def known(test_id, verdict=FULL, kind="protocol-defect", signature=SIGNATURE):
+    return {"test_id": test_id, "verdict": verdict, "kind": kind, "signature": signature,
             "evidence": "observed", "explanation": "because"}
 
 
@@ -334,11 +343,36 @@ class Comparison(Base):
         self.assertEqual(sorted(row["test_id"] for row in result["stale"]), ["T-gone", "T-off"])
         self.assertTrue(result["ok"])
 
-    def test_entry_for_an_inapplicable_test_is_stale_not_accepted(self):
+    def test_known_failure_that_became_inapplicable_is_not_accepted_and_fails(self):
         self.builder.test("T-off", "DISABLED", cases=0, disabled="n/a")
         result = self.compare(baseline(known("T-off")))
-        self.assertEqual([row["test_id"] for row in result["stale"]], ["T-off"])
+        self.assertFalse(result["ok"])
+        self.assertEqual([row["test_id"] for row in result["newly_inapplicable"]], ["T-off"])
         self.assertEqual(result["accepted"], [])
+
+    def test_a_test_that_newly_becomes_inapplicable_fails_the_comparison(self):
+        self.builder.test("T-pass").test("T-off", "DISABLED", cases=0, disabled="feature gone")
+        result = self.compare(baseline(inapplicable=[]))
+        self.assertFalse(result["ok"])
+        self.assertEqual([row["test_id"] for row in result["newly_inapplicable"]], ["T-off"])
+
+    def test_recorded_inapplicable_tests_are_accepted(self):
+        self.builder.test("T-pass").test("T-off", "DISABLED", cases=0, disabled="n/a")
+        self.assertTrue(self.compare(baseline(inapplicable=["T-off"]))["ok"])
+
+    def test_recorded_inapplicable_test_that_now_runs_is_flagged_for_review(self):
+        self.builder.test("T-pass")
+        result = self.compare(baseline(inapplicable=["T-pass"]))
+        self.assertTrue(result["ok"])
+        self.assertEqual([row["test_id"] for row in result["stale"]], ["T-pass"])
+
+    def test_changed_client_behaviour_under_the_same_verdict_fails(self):
+        self.builder.test("T-known", FULL, failed=[0])
+        result = self.compare(baseline(known("T-known", signature=["handshake-error/Complete/BR_ERR_UNEXPECTED"])))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["accepted"], [])
+        self.assertEqual(result["changed"][0]["recorded"], FULL)
+        self.assertIn("handshake-error", result["changed"][0]["reason"])
 
     def test_baseline_for_another_suite_revision_fails(self):
         self.builder.test("T-pass")
@@ -353,13 +387,26 @@ class Comparison(Base):
             with self.subTest(entry=entry), self.assertRaises(s.BaselineError):
                 s.load_baseline_data(baseline(entry))
 
+    def test_signature_and_inapplicable_records_are_required_and_consistent(self):
+        bad = [dict(known("T-x"), signature="success"), dict(known("T-x"), signature=[1]),
+               {k: v for k, v in known("T-x").items() if k != "signature"}]
+        for entry in bad:
+            with self.subTest(entry=entry), self.assertRaises(s.BaselineError):
+                s.load_baseline_data(baseline(entry))
+        for raw in (dict(baseline(), inapplicable="T-x"), dict(baseline(), inapplicable=[{"reason": "r"}]),
+                    {k: v for k, v in baseline().items() if k != "inapplicable"},
+                    baseline(known("T-x"), inapplicable=["T-x"]),
+                    baseline(inapplicable=["T-y", "T-y"])):
+            with self.subTest(raw=raw), self.assertRaises(s.BaselineError):
+                s.load_baseline_data(raw)
+
     def test_duplicate_entries_are_rejected(self):
         with self.assertRaises(s.BaselineError):
             s.load_baseline_data(baseline(known("T-x"), known("T-x")))
 
     def test_passing_inapplicable_and_excluded_runs_are_ok_with_an_empty_baseline(self):
         self.builder.test("T-pass").test("T-off", "DISABLED", cases=0, disabled="n/a")
-        result = self.compare(baseline(), excluded=PROFILE["excluded"])
+        result = self.compare(baseline(inapplicable=["T-off"]), excluded=PROFILE["excluded"])
         self.assertTrue(result["ok"])
 
 

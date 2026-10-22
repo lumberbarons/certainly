@@ -103,6 +103,7 @@ def entry_for(run, entry, invocation):
               "cases": 0, "classification": "harness-failure", "disabled_reason": None,
               "discovery_only": bool(entry.get("discovery_only")),
               "failed_cases": [], "errors": [], "tls_versions": [], "tls12_fallback": False,
+              "signature": [],
               "client_outcomes": {}, "reproduce": reproduction(invocation, test_id)}
     if entry.get("harness_error"):
         record["errors"] = [entry["harness_error"]]
@@ -124,8 +125,11 @@ def entry_for(run, entry, invocation):
     results = [a.get("result") or {} for a in executed]
     versions = sorted({r["tls_version"] for r in results if r.get("tls_version")})
     fallback = any(r.get("tls12_fallback_attempted") or r.get("tls_version") == "1.2" for r in results)
+    # What the client did, not how many cases the suite happened to sample.
+    signature = sorted({f"{r['outcome']}/{r.get('tls13_state')}/{r.get('bearssl_error_name')}"
+                        for r in results if r.get("outcome")})
     record.update(
-        {"class": test.get("TestClass"), "method": test.get("TestMethod"),
+        {"signature": signature, "class": test.get("TestClass"), "method": test.get("TestMethod"),
          "rfc": rfc_label(test.get("MetaData")), "verdict": test["Result"],
          "cases": len(test["TestCases"]), "disabled_reason": test.get("DisabledReason"),
          "tls_versions": versions, "tls12_fallback": fallback,
@@ -204,9 +208,19 @@ def load_baseline_data(raw):
             raise BaselineError(f"{test_id}: only protocol defects can be accepted as known failures")
         if entry.get("verdict") not in SEVERITY[1:]:
             raise BaselineError(f"{test_id}: verdict must be a non-strict upstream verdict")
+        if not isinstance(entry.get("signature"), list) or \
+                any(not isinstance(item, str) for item in entry["signature"]):
+            raise BaselineError(f"{test_id}: signature must list the client outcomes seen")
         for field in ("evidence", "explanation"):
             if not isinstance(entry.get(field), str) or not entry[field].strip():
                 raise BaselineError(f"{test_id}: missing {field}")
+    inapplicable = raw.get("inapplicable")
+    if not isinstance(inapplicable, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("test_id"), str) for row in inapplicable):
+        raise BaselineError("baseline must list the tests the suite marks inapplicable")
+    ids = [row["test_id"] for row in inapplicable]
+    if len(set(ids)) != len(ids) or seen.intersection(ids):
+        raise BaselineError("a test is listed twice, or as both a known failure and inapplicable")
     return raw
 
 
@@ -222,8 +236,9 @@ def compare(summary, baseline):
     baseline = load_baseline_data(baseline)
     known = {entry["test_id"]: entry for entry in baseline["known_failures"]}
     by_id = {t["test_id"]: t for t in summary["tests"]}
+    recorded_inapplicable = {row["test_id"] for row in baseline["inapplicable"]}
     result = {"accepted": [], "new_failures": [], "changed": [], "improvements": [],
-              "stale": [], "harness_failures": [], "problems": []}
+              "stale": [], "harness_failures": [], "newly_inapplicable": [], "problems": []}
     revision = summary["suite"].get("revision")
     if baseline["suite_revision"] != revision:
         result["problems"].append(f"baseline was recorded for suite revision "
@@ -235,6 +250,11 @@ def compare(summary, baseline):
         elif test["classification"] == "protocol-failure":
             if entry is None or test["errors"]:
                 result["new_failures"].append(test)
+            elif entry["verdict"] == test["verdict"] and entry["signature"] != test["signature"]:
+                result["changed"].append(
+                    {"test_id": test["test_id"], "recorded": entry["verdict"], "observed": test["verdict"],
+                     "reason": f"client behaviour changed: recorded {entry['signature']}, "
+                               f"observed {test['signature']}", "test": test})
             elif entry["verdict"] == test["verdict"]:
                 result["accepted"].append(test)
             else:
@@ -242,16 +262,23 @@ def compare(summary, baseline):
                        "observed": test["verdict"], "test": test}
                 worse = SEVERITY.index(test["verdict"]) > SEVERITY.index(entry["verdict"])
                 result["changed" if worse else "improvements"].append(row if worse else test)
+        elif test["classification"] == "inapplicable":
+            # Coverage that silently disappears is a regression too, even for a known failure.
+            if test["test_id"] not in recorded_inapplicable:
+                result["newly_inapplicable"].append(test)
         elif entry is not None and test["classification"] == "passed":
             result["improvements"].append(test)
     for test_id, entry in known.items():
-        test = by_id.get(test_id)
-        if test is None or test["classification"] == "inapplicable":
+        if test_id not in by_id:
             result["stale"].append({"test_id": test_id, "recorded": entry["verdict"],
-                                    "reason": "not executed" if test is None
-                                    else f"inapplicable: {test['disabled_reason']}"})
-    result["ok"] = not (result["new_failures"] or result["changed"] or
-                        result["harness_failures"] or result["problems"])
+                                    "reason": "not executed"})
+    for test_id in sorted(recorded_inapplicable):
+        test = by_id.get(test_id)
+        if test is None or test["classification"] != "inapplicable":
+            result["stale"].append({"test_id": test_id, "recorded": "inapplicable",
+                                    "reason": "not executed" if test is None else "now applicable"})
+    result["ok"] = not (result["new_failures"] or result["changed"] or result["harness_failures"]
+                        or result["newly_inapplicable"] or result["problems"])
     return result
 
 
@@ -315,7 +342,9 @@ def render(summary, comparison=None, brief=False):
         section(lines, "  new failures", [describe(t) for t in comparison["new_failures"]])
         section(lines, "  changed outcomes",
                 [f"{row['test_id']}: recorded {row['recorded']}, observed {row['observed']}"
-                 for row in comparison["changed"]])
+                 + (f" ({row['reason']})" if row.get("reason") else "") for row in comparison["changed"]])
+        section(lines, "  newly inapplicable",
+                [f"{t['test_id']}: {t['disabled_reason']}" for t in comparison["newly_inapplicable"]])
         section(lines, "  improvements to review", [describe(t) if "class" in t else f"{t['test_id']}"
                                                     for t in comparison["improvements"]])
         section(lines, "  stale baseline entries",

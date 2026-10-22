@@ -82,10 +82,10 @@ def stop_process(process):
     process.wait(timeout=2)
 
 
-def command(args, **kwargs):
+def command(args, timeout=60, **kwargs):
     try:
         result = subprocess.run(args, capture_output=True, text=True,
-                                timeout=60, **kwargs)
+                                timeout=timeout, **kwargs)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise HarnessError(f"cannot execute {args[0]}: {error}") from error
     if result.returncode:
@@ -478,16 +478,15 @@ def run_test(args, lock, jar, anchors, run, test_id, allow_inapplicable=False,
 
 
 def check_port(port):
-    """Fail early and by number if the suite's port is taken.
+    """Fail early and by number if something already answers on the suite's port.
 
-    The suite listens with SO_REUSEADDR, so a previous run's TIME_WAIT entries
-    must not count as busy."""
-    with socket.socket() as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind(("127.0.0.1", port))
-        except OSError as error:
-            raise HarnessError(f"port {port} is not available: {error}") from error
+    Connecting, rather than binding, sees a listener on any local address and
+    ignores a previous run's TIME_WAIT entries, which the suite can reuse."""
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+    except OSError:
+        return
+    raise HarnessError(f"port {port} is not available: something is already listening")
 
 
 def validate_profile(profile):
@@ -610,7 +609,8 @@ def run_inventory(args, lock, jar):
     destination = Path(tempfile.mkdtemp(prefix="inventory-", dir=OUT)) / "inventory.json"
     classpath = str(jar) + os.pathsep + str(jar.parent / "lib/*")
     command([args.java, "--class-path", classpath, str(HERE / "fixtures/AnvilInventory.java"),
-             str(jar), str(destination)], cwd=destination.parent)  # the suite's loggers write to cwd
+             str(jar), str(destination)], timeout=300,  # compiles the helper and loads every suite class
+            cwd=destination.parent)  # the suite's loggers write to cwd
     report = check_inventory(json.loads(destination.read_text()), profile)
     print(f"Inventory: {report['compiled']} compiled templates, {report['applicable']} applicable "
           f"to a TLS 1.3 client; {report['executed']} executed, {report['excluded']} excluded "
@@ -634,7 +634,7 @@ def main():
     parser.add_argument("--profile", default="smoke",
                         help="profile in tests/conformance/profiles/ to run (default: smoke)")
     parser.add_argument("--test", help="run one exact upstream test ID instead of a profile")
-    parser.add_argument("--inventory", action="store_true",
+    parser.add_argument("--check-profile", action="store_true",
                         help="check that the profile accounts for every applicable suite template; runs no client")
     parser.add_argument("--baseline", nargs="?", const=str(HERE / "baseline.json"), metavar="FILE",
                         help="accept only the exact known protocol failures recorded in FILE "
@@ -659,8 +659,8 @@ def main():
                                                           args.total_timeout)) \
                 or not 0 < args.port < 65536:
             raise HarnessError("invalid deadline or port")
-        if args.inventory and (args.test or args.baseline):
-            raise HarnessError("--inventory runs nothing; it cannot be combined with --test or --baseline")
+        if args.check_profile and (args.test or args.baseline):
+            raise HarnessError("--check-profile runs nothing; it cannot be combined with --test or --baseline")
         lock = json.loads((HERE / "anvil.lock").read_text())
         profile = profile_sha = None
         if args.test is None:
@@ -670,7 +670,7 @@ def main():
         match = re.search(r'version "(\d+)', version)
         if not match or int(match[1]) < lock["java_min"]:
             raise HarnessError(f"Java {lock['java_min']}+ required: {version.strip()}")
-        if args.inventory:
+        if args.check_profile:
             installation, jar = suite_install(args, lock)
             return 0 if run_inventory(args, lock, jar)["ok"] else 1
         if args.backend == "certainly":
@@ -731,7 +731,7 @@ def main():
         comparison = summarize.compare(summary, baseline) if baseline else None
         code = summarize.exit_code(summary, comparison)
         write_json(run / "result.json", dict(index, status=("passed", "protocol-failure", "harness-failure")[code],
-                                             mode="baseline" if baseline else "inventory"))
+                                             mode="baseline" if baseline else "strict"))
         write_json(run / "summary.json", {"summary": summary, "comparison": comparison})
         text = summarize.render(summary, comparison)
         (run / "summary.txt").write_text(text)
