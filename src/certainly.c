@@ -92,6 +92,11 @@ static MacTLS_Error setup_bearssl(MacTLS_Context *ctx)
      */
     br_ssl_client_init_full(&ctx->sc, &ctx->xc, tas, tas_count);
 
+    if (ctx->config && ctx->config->validation_time_set) {
+        br_x509_minimal_set_time(&ctx->xc, ctx->config->validation_days,
+                                 ctx->config->validation_seconds);
+    }
+
     /* Override with our preferred cipher suites */
     br_ssl_engine_set_suites(&ctx->sc.eng, suites,
                              sizeof(suites) / sizeof(suites[0]));
@@ -149,6 +154,15 @@ static MacTLS_Error setup_bearssl(MacTLS_Context *ctx)
 
 /* ── Connection lifecycle ── */
 
+/* Where the socket goes; the TLS name in ctx->host is validated separately. */
+static const char *transport_target(const MacTLS_Context *ctx)
+{
+    if (ctx->config && ctx->config->connect_host) {
+        return ctx->config->connect_host;
+    }
+    return ctx->host;
+}
+
 MacTLS_Context *MacTLS_Create(const char *host, uint16_t port)
 {
     return MacTLS_CreateWithConfig(host, port, NULL);
@@ -193,7 +207,7 @@ MacTLS_Context *MacTLS_CreateWithConfig(const char *host, uint16_t port,
     }
 
     /* Start TCP connection */
-    ctx->transport = ot_transport_create(host, port);
+    ctx->transport = ot_transport_create(transport_target(ctx), port);
     if (ctx->transport == NULL) {
         ctx->state = kMacTLS_Error;
         ctx->error = kMacTLS_ErrMemory;
@@ -372,7 +386,7 @@ static MacTLS_State tls13_pump_handshake(MacTLS_Context *ctx)
             ot_transport_destroy(ctx->transport);
 
             /* Create a new transport */
-            ctx->transport = ot_transport_create(ctx->host, port);
+            ctx->transport = ot_transport_create(transport_target(ctx), port);
             if (ctx->transport == NULL) {
                 ctx->state = kMacTLS_Error;
                 ctx->error = kMacTLS_ErrMemory;

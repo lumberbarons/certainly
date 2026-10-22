@@ -116,11 +116,11 @@ a later run.
 
 ### US1
 
-- [ ] T001 Reuse the existing host Mac-header stubs and isolate any additional declarations needed for a complete native client build, keeping protocol and pump behavior shared — `tests/host/stubs/`, `include/certainly.h`, `src/certainly_internal.h`, `src/ot_transport.h`, `src/certainly.c`
-- [ ] T002 Extend the host BearSSL build with adapters for nonblocking sockets, partial reads/writes, would-block, EOF, errors, allocation, and 60 Hz ticks; register OS randomness through the existing trusted provider API while retaining portable entropy.c, and check adapter error semantics — `tests/host/Makefile`, `tests/host/stubs/`, `tests/host/platform/`, `src/entropy.h`, `include/certainly.h`
-- [ ] T003 Add test-only certificate fixtures and internal configuration for trust anchors, validity time, TLS hostname, and destination routing; retain chain, hostname, and CertificateVerify verification — `tests/conformance/fixtures/`, `src/certainly_internal.h`, `src/certainly.c`
-- [ ] T004 Build a bounded command-line client with handshake-only and application-data modes, fresh connection state, TLS-version checks, and structured attempt logs; expose detailed TLS 1.3 errors internally where the existing accessor is insufficient — `tests/conformance/certainly_client.c`, `src/certainly.c`, `src/tls13_handshake.h`
-- [ ] T005 Prove the host client against a controlled reference server with trusted success, wrong-hostname/untrusted rejection, both advertised TLS 1.3 suites, application-data exchange, and injected partial I/O — `tests/conformance/check-client.sh`, `tests/host/platform/`, `tests/host/Makefile`
+- [x] T001 Reuse the existing host Mac-header stubs and isolate any additional declarations needed for a complete native client build, keeping protocol and pump behavior shared — `tests/host/stubs/`, `include/certainly.h`, `src/certainly_internal.h`, `src/ot_transport.h`, `src/certainly.c`
+- [x] T002 Extend the host BearSSL build with adapters for nonblocking sockets, partial reads/writes, would-block, EOF, errors, allocation, and 60 Hz ticks; register OS randomness through the existing trusted provider API while retaining portable entropy.c, and check adapter error semantics — `tests/host/Makefile`, `tests/host/stubs/`, `tests/host/platform/`, `src/entropy.h`, `include/certainly.h`
+- [x] T003 Add test-only certificate fixtures and internal configuration for trust anchors, validity time, TLS hostname, and destination routing; retain chain, hostname, and CertificateVerify verification — `tests/conformance/fixtures/`, `src/certainly_internal.h`, `src/certainly.c`
+- [x] T004 Build a bounded command-line client with handshake-only and application-data modes, fresh connection state, TLS-version checks, and structured attempt logs; expose detailed TLS 1.3 errors internally where the existing accessor is insufficient — `tests/conformance/certainly_client.c`, `src/certainly.c`, `src/tls13_handshake.h`
+- [x] T005 Prove the host client against a controlled reference server with trusted success, wrong-hostname/untrusted rejection, both advertised TLS 1.3 suites, application-data exchange, and injected partial I/O — `tests/conformance/check-client.sh`, `tests/host/platform/`, `tests/host/Makefile`
 
 ### US2
 
@@ -149,9 +149,9 @@ a later run.
 ## Done When
 
 - [ ] Following the documented prerequisites, a clean native build uses no Retro68 headers, and existing host tests still pass; a separate Retro68 build still produces the library and example apps.
-- [ ] The native client negotiates TLS 1.3 and exchanges an exact known payload with a trusted local peer using each currently advertised TLS 1.3 cipher suite; the same fixture fails for a wrong hostname or an untrusted certificate.
+- [x] The native client negotiates TLS 1.3 and exchanges an exact known payload with a trusted local peer using each currently advertised TLS 1.3 cipher suite; the same fixture fails for a wrong hostname or an untrusted certificate.
 - [ ] Both host and guest use the production trusted-entropy requirement; a missing or failed provider/seed produces an entropy setup error before key generation and never counts as successful protocol rejection.
-- [ ] Limiting transport reads/writes to small chunks and injecting would-block conditions preserves the positive exchange, while orderly EOF, reset, and a stalled peer terminate with distinct logged outcomes within the configured deadline plus a documented cleanup allowance.
+- [x] Limiting transport reads/writes to small chunks and injecting would-block conditions preserves the positive exchange, while orderly EOF, reset, and a stalled peer terminate with distinct logged outcomes within the configured deadline plus a documented cleanup allowance.
 - [ ] One documented command runs a pinned TLS-Anvil smoke selection containing a valid exchange and an invalid handshake and saves both raw suite reports and client attempts; a single selected test can be reproduced without running the wider profile.
 - [ ] The invalid smoke case demonstrably reaches the intended protocol check and its expected alert/closure is evaluated by TLS-Anvil; a certificate setup failure, crash, or timeout cannot count as that case passing. If Certainly has a protocol defect, the smoke run retains it as a visible failure.
 - [ ] Missing prerequisites, a failed trigger, zero executed tests, a missing/incomplete report, or a client that does not terminate cause a nonzero runner exit with a diagnostic, including cleanup of owned processes and sockets.

@@ -21,3 +21,4 @@ tests/host/test_record_app
 tests/host/*.dSYM
 tests/host/test_entropy
 tests/host/obj/
+tests/host/test_host_transport
