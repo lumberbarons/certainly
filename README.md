@@ -205,6 +205,19 @@ build; the seed-file helper in `examples/common` and the Create/Pump wiring
 have only been checked by reading, not by a Retro68 build or an emulator or
 hardware run. Validate those on the target before relying on them.
 
+For complete native TLS connections, `make -C tests/host conformance-check`
+checks controlled peers. The pinned external TLS-Anvil smoke is one command:
+
+```sh
+ANVIL_PYTHON=python3.12 tests/conformance/run-anvil.sh --fetch
+```
+
+It needs a JDK 21+, Python 3.11+, a native C compiler and make. It checks a
+valid TLS 1.3 exchange and corrupted Finished messages, retaining raw suite
+reports and correlated client logs. See [conformance testing](tests/conformance/README.md)
+for prerequisites, the reference-client control, single-test execution and
+exit semantics. Native results do not replace Mac OS 9 target checks.
+
 ---
 
 ## Running on Mac OS 9

@@ -22,11 +22,14 @@ typedef struct {
     unsigned wouldblock_every;   /* every Nth recv and send reports "no room /
                                     no data" without touching the socket;
                                     0 = never */
+    int      single_connection;  /* refuse reconnects during one external-suite attempt */
 } host_transport_faults;
 
 /* Observations the pump cannot see through its interface. */
 typedef struct {
     unsigned long connects;          /* sockets opened */
+    unsigned long connect_attempts;
+    unsigned      first_local_port;  /* correlate the initial handshake with peer reports */
     unsigned long bytes_sent;
     unsigned long bytes_received;
     unsigned long recv_calls;

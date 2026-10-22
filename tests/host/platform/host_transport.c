@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
@@ -94,7 +95,7 @@ OTTransport *ot_transport_create(const char *host, uint16_t port)
     OTTransport *t;
     struct addrinfo hints, *ai = NULL;
     char service[8];
-    int fd, flags, rc;
+    int fd, flags, rc, connect_errno;
 
     t = (OTTransport *)NewPtrClear(sizeof(OTTransport));
     if (t == NULL) return NULL;
@@ -102,6 +103,11 @@ OTTransport *ot_transport_create(const char *host, uint16_t port)
     t->port = port;
     t->state = kOTTransport_Idle;
     t->connect_start_ticks = (uint32_t)TickCount();
+    g_stats.connect_attempts++;
+    if (g_faults.single_connection && g_stats.connect_attempts > 1) {
+        fail_create(t, ECANCELED);
+        return t;
+    }
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_socktype = SOCK_STREAM;
@@ -130,9 +136,21 @@ OTTransport *ot_transport_create(const char *host, uint16_t port)
     t->endpoint = (EndpointRef)(intptr_t)(fd + 1);
 
     rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
+    connect_errno = errno;
+    if (g_stats.first_local_port == 0) {
+        struct sockaddr_storage local;
+        socklen_t local_len = sizeof(local);
+
+        if (getsockname(fd, (struct sockaddr *)&local, &local_len) == 0) {
+            if (local.ss_family == AF_INET)
+                g_stats.first_local_port = ntohs(((struct sockaddr_in *)&local)->sin_port);
+            else if (local.ss_family == AF_INET6)
+                g_stats.first_local_port = ntohs(((struct sockaddr_in6 *)&local)->sin6_port);
+        }
+    }
     freeaddrinfo(ai);
-    if (rc != 0 && errno != EINPROGRESS) {
-        fail_create(t, errno);
+    if (rc != 0 && connect_errno != EINPROGRESS) {
+        fail_create(t, connect_errno);
         return t;
     }
 

@@ -51,9 +51,12 @@ LIB_OBJS = $(patsubst %,obj/certainly/%.o,$(LIB_SRCS))
 PLATFORM_OBJS = $(patsubst %,obj/platform/%.o,host_ticks host_alloc host_entropy host_transport)
 CONF = ../conformance
 CONF_OUT = ../../build/conformance
+ANVIL_PYTHON ?= python3
+ANVIL_ARGS ?=
 BEARSSL_TOOLS = ../../bearssl/tools
 
-.PHONY: all clean clean-client test asan conformance-client conformance-check
+.PHONY: all clean clean-client test asan conformance-client conformance-check \
+        conformance-anvil conformance-anvil-reference conformance-runner-check
 
 all: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport
 
@@ -140,6 +143,15 @@ clean-client:
 
 conformance-check: conformance-client
 	$(CONF)/check-client.sh
+
+conformance-anvil:
+	ANVIL_PYTHON="$(ANVIL_PYTHON)" $(CONF)/run-anvil.sh $(ANVIL_ARGS)
+
+conformance-anvil-reference:
+	ANVIL_PYTHON="$(ANVIL_PYTHON)" $(CONF)/run-anvil.sh --backend openssl $(ANVIL_ARGS)
+
+conformance-runner-check:
+	$(ANVIL_PYTHON) $(CONF)/test_controller.py
 
 # Rebuild and run the record tests with AddressSanitizer and UBSan. The
 # conformance client takes the same flags:

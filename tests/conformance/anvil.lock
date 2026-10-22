@@ -1,0 +1,10 @@
+{
+  "version": "1.5.3",
+  "revision": "e9e9ac7160789d66736d36f3bc62430f6a49d497",
+  "url": "https://github.com/tls-attacker/TLS-Anvil/releases/download/v1.5.3/TLS-Anvil-v1.5.3.zip",
+  "sha256": "2618a8419a26e81f72649437f2f50b035609d23def3b62f270087de99311341f",
+  "jar": "apps/TLS-Anvil.jar",
+  "java_min": 21,
+  "server_name": "tls-attacker.com",
+  "validation_time": 1798761600
+}

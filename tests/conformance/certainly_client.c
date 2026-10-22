@@ -88,6 +88,7 @@ typedef struct {
     const char   *send_file;
     const char   *expect_file;
     int           until_close;
+    int           send_only;
     const char   *out_file;
     const char   *log_file;
     int64_t       deadline_ms;
@@ -109,6 +110,7 @@ static void usage(void)
 "  --send FILE                data: bytes to write once connected\n"
 "  --expect FILE              data: finish after exactly these bytes arrive\n"
 "  --recv-until-close         data: read until the peer closes with an alert\n"
+"  --send-only                data: finish after the payload is flushed to TCP\n"
 "  --out FILE                 data: store everything received\n"
 "  --deadline-ms N            whole-attempt limit (default 15000)\n"
 "  --validation-time UNIX     X.509 validation time (default: OS clock)\n"
@@ -116,6 +118,7 @@ static void usage(void)
 "  --read-chunk N             cap bytes per transport read\n"
 "  --write-chunk N            cap bytes per transport write\n"
 "  --wouldblock-every N       report no-data/no-room on every Nth call\n"
+"  --single-connection        report fallback without opening a second socket\n"
 "  --alloc-fail-after N       fail Memory Manager allocations after N\n"
 "  --allow-tls12              accept a TLS 1.2 fallback as success\n"
 "  --log FILE                 JSON event log (default stdout)\n"
@@ -152,6 +155,8 @@ static int parse_options(int argc, char **argv, options *o)
 
         if (strcmp(a, "--allow-tls12") == 0) { o->allow_tls12 = 1; continue; }
         if (strcmp(a, "--recv-until-close") == 0) { o->until_close = 1; continue; }
+        if (strcmp(a, "--send-only") == 0) { o->send_only = 1; continue; }
+        if (strcmp(a, "--single-connection") == 0) { o->faults.single_connection = 1; continue; }
         if (v == NULL) {
             fprintf(stderr, "missing value for %s\n", a);
             return -1;
@@ -214,12 +219,17 @@ static int parse_options(int argc, char **argv, options *o)
               stderr);
         return -1;
     }
-    if (o->data_mode && !o->expect_file && !o->until_close) {
-        fputs("data mode needs --expect or --recv-until-close\n", stderr);
+    if (o->data_mode && !o->expect_file && !o->until_close && !o->send_only) {
+        fputs("data mode needs --expect, --recv-until-close or --send-only\n", stderr);
         return -1;
     }
     if (o->expect_file && o->until_close) {
         fputs("--expect and --recv-until-close are exclusive\n", stderr);
+        return -1;
+    }
+    if (o->send_only && (!o->data_mode || !o->send_file || o->allow_tls12 ||
+                         o->expect_file || o->until_close)) {
+        fputs("--send-only needs TLS 1.3 data mode and --send, without a receive mode\n", stderr);
         return -1;
     }
     return 0;
@@ -359,6 +369,7 @@ typedef struct {
     const char    *phase;        /* where the attempt ended */
     int            reached_handshake;
     int            connected;
+    MacTLS_Version version;      /* the accessor returns Unknown after closure */
     const char    *close_cause;  /* alert, eof, reset or "" */
     unsigned long  sent;
     unsigned long  received;
@@ -413,7 +424,9 @@ static void log_result(const options *o, attempt *at, MacTLS_Context *ctx,
     jb_int(&j, "bytes_sent", (long long)at->sent);
     jb_int(&j, "bytes_received", (long long)at->received);
     jb_int(&j, "connections", (long long)st->connects);
-    jb_bool(&j, "tls12_fallback_attempted", st->connects > 1);
+    jb_int(&j, "connection_attempts", (long long)st->connect_attempts);
+    jb_int(&j, "local_port", st->first_local_port);
+    jb_bool(&j, "tls12_fallback_attempted", st->connect_attempts > 1);
     jb_int(&j, "wire_bytes_sent", (long long)st->bytes_sent);
     jb_int(&j, "wire_bytes_received", (long long)st->bytes_received);
     jb_int(&j, "wouldblocks_injected", (long long)st->wouldblocks_injected);
@@ -436,8 +449,8 @@ static void log_result(const options *o, attempt *at, MacTLS_Context *ctx,
         jb_str(&j, "tls13_state", hs_state_name(ctx->hs13.state));
         if (at->connected) {
             jb_str(&j, "tls_version",
-                   MacTLS_GetVersion(ctx) == kMacTLS_Version13 ? "1.3" : "1.2");
-            if (MacTLS_GetVersion(ctx) == kMacTLS_Version13) {
+                   at->version == kMacTLS_Version13 ? "1.3" : "1.2");
+            if (at->version == kMacTLS_Version13) {
                 jb_raw(&j, ",\"cipher_suite\":\"0x%04x\"",
                        (unsigned)ctx->hs13.cipher_suite);
             }
@@ -453,6 +466,7 @@ static void run_attempt(const options *o, attempt *at, MacTLS_Context *ctx,
 {
     int64_t deadline = host_monotonic_ms() + o->deadline_ms;
     MacTLS_State last = (MacTLS_State)-1;
+    int64_t send_done_ms = 0;
     unsigned char rbuf[4096];
 
     /* A transport that fails inside create never reports Connecting. */
@@ -467,6 +481,14 @@ static void run_attempt(const options *o, attempt *at, MacTLS_Context *ctx,
 
         if (host_monotonic_ms() >= deadline) {
             at->result = OUT_TIMEOUT;
+            return;
+        }
+
+        /* A TLS 1.3-only attempt ends as soon as the pump requests a
+         * fallback. Do not send a second ClientHello into a later suite
+         * workflow while waiting to discover which TLS 1.2 error wins. */
+        if (!o->allow_tls12 && ts->connect_attempts > 1) {
+            at->result = OUT_TLS12_FALLBACK;
             return;
         }
 
@@ -497,6 +519,7 @@ static void run_attempt(const options *o, attempt *at, MacTLS_Context *ctx,
             jbuf j;
 
             at->connected = 1;
+            at->version = MacTLS_GetVersion(ctx);
             at->reached_handshake = 1;
             at->phase = o->data_mode ? "data" : "handshake";
             jb_begin(&j, "connected");
@@ -559,6 +582,17 @@ static void run_attempt(const options *o, attempt *at, MacTLS_Context *ctx,
                 at->sent == send_len) {
                 at->result = OUT_SUCCESS;
                 return;
+            }
+            if (o->send_only && at->sent == send_len &&
+                ctx->tls13_send_offset == ctx->tls13_send_len && ctx->tls13_active) {
+                /* Let the peer finish collecting the payload before our
+                 * close_notify can appear in its final ReceiveAction. The
+                 * original attempt deadline still bounds this grace period. */
+                if (send_done_ms == 0) send_done_ms = host_monotonic_ms();
+                if (st == kMacTLS_Closed || host_monotonic_ms() - send_done_ms >= 250) {
+                    at->result = OUT_SUCCESS;
+                    return;
+                }
             }
         }
 

@@ -74,7 +74,7 @@ static OTTransport *connect_pair(int lfd, uint16_t port, int *peer)
 
 static void set_faults(size_t max_read, size_t max_write, unsigned every)
 {
-    host_transport_faults f;
+    host_transport_faults f = {0};
 
     f.max_read = max_read;
     f.max_write = max_write;
@@ -250,6 +250,37 @@ static void test_allocation_failure(void)
     host_alloc_fail_after(-1);
 }
 
+static void test_single_connection(int lfd, uint16_t port)
+{
+    host_transport_faults faults = {0};
+    struct sockaddr_in address;
+    socklen_t size = sizeof(address);
+    struct pollfd pending = { lfd, POLLIN, 0 };
+    int peer;
+    OTTransport *first, *second;
+
+    faults.single_connection = 1;
+    host_transport_set_faults(&faults);
+    host_transport_reset_stats();
+    first = connect_pair(lfd, port, &peer);
+    CHECK(getpeername(peer, (struct sockaddr *)&address, &size) == 0,
+          "cannot read the peer-observed port");
+    CHECK(host_transport_get_stats()->first_local_port == ntohs(address.sin_port),
+          "correlation port differs from the peer's observation");
+    second = ot_transport_create("127.0.0.1", port);
+    CHECK(ot_transport_pump(second) == kOTTransport_Error,
+          "a second socket must be refused in single-connection mode");
+    CHECK(host_transport_get_stats()->connect_attempts == 2 &&
+          host_transport_get_stats()->connects == 1,
+          "fallback must be recorded without opening a second socket");
+    CHECK(poll(&pending, 1, 0) == 0, "a reconnect reached the listener");
+    CHECK(ot_transport_send(first, "x", 1) == 1, "the first connection was disturbed");
+    ot_transport_destroy(second);
+    ot_transport_destroy(first);
+    close(peer);
+    set_faults(0, 0, 0);
+}
+
 int main(void)
 {
     uint16_t port;
@@ -260,6 +291,7 @@ int main(void)
     test_partial_reads_and_wouldblock(lfd, port);
     test_orderly_eof(lfd, port);
     test_reset(lfd, port);
+    test_single_connection(lfd, port);
     close(lfd);
     test_connect_failures();
     test_allocation_failure();
