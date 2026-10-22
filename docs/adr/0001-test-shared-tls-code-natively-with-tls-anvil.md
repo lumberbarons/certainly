@@ -15,9 +15,11 @@ tags: [tls, testing, portability]
 ## Context and Problem Statement
 
 Certainly is a C99 TLS client for PowerPC Mac OS 9, driven by a nonblocking
-`MacTLS_Pump` loop. Its host tests exercise key-schedule vectors and HTTP
-handling, while the full connection path depends on Open Transport, Mac memory
-allocation, timers, and entropy sources. Public HTTPS sweeps demonstrate
+`MacTLS_Pump` loop. Its host tests exercise key-schedule vectors, HTTP handling,
+trusted entropy, and record boundaries; the application-record tests compile
+the real pump against Mac-header stubs and fake transport. Complete connections
+still depend on Open Transport, Mac allocation and timers, and a trusted seed
+source. Public HTTPS sweeps demonstrate
 interoperability but do not establish correct handling of malformed peers. We
 need an independent protocol test peer and a fast way to exercise the complete
 client without making the emulator the prerequisite for every investigation.
@@ -34,6 +36,9 @@ client without making the emulator the prerequisite for every investigation.
 - Preserve Mac OS 9's cooperative scheduling contract, C99 compatibility,
   `NewPtrClear`/`DisposePtr` allocation, and Open Transport production backend.
   Host sockets, host allocation, and host entropy must stay outside that build.
+- Preserve the production trusted-seed requirement in portable `src/entropy.c`.
+  Host OS randomness must enter through the existing provider API; supplemental
+  platform input and test stubs must never satisfy that requirement.
 - Extend the existing native `cc` testing workflow so individual failures can
   be reproduced without booting a PowerPC emulator; keep the separate Retro68
   build and actual target smoke coverage.
@@ -66,7 +71,9 @@ tests**.
 
 Build the complete Certainly client natively for testing, substituting a narrow
 platform boundary for TCP transport, platform declarations, allocation, timing,
-and entropy. The native and Retro68 builds must share the connection pump, TLS
+and entropy sources. Retain portable `src/entropy.c` and register a host OS
+randomness provider rather than substituting fake entropy success. The native
+and Retro68 builds must share the connection pump, TLS
 state machines, record handling, certificate verification, and cryptographic
 implementation. Host testing is a test facility, not a supported general-purpose
 POSIX port.
@@ -175,14 +182,17 @@ host CPU behavior cannot establish Open Transport or PowerPC correctness.
 ## Implementation Notes
 
 - Share `src/certainly.c`, `src/tls13_handshake.c`, `src/tls13_keysched.c`,
-  `src/tls13_record.c`, and vendored BearSSL. Keep backend selection explicit
+  `src/tls13_record.c`, `src/entropy.c`, and vendored BearSSL. Keep backend selection explicit
   in build configuration; do not introduce host-only acceptance behavior into
   protocol code or copy the pump into a harness.
 - Isolate the platform dependencies currently exposed through
   `include/certainly.h`, `src/ot_transport.h`, and
-  `src/certainly_internal.h`. Native adapters replace the services supplied by
-  `src/ot_transport.c`, `src/entropy.c`, Mac allocation, and ticks. Preserve the
-  transport contract for partial I/O, would-block, orderly EOF, and errors.
+  `src/certainly_internal.h`. Reuse `tests/host/stubs/` and the host BearSSL build.
+  Native adapters replace Open Transport, Mac allocation and ticks, and the
+  supplemental gathering hook from `src/entropy_mac.c`; trusted host randomness
+  enters through `MacTLS_SetEntropyProvider`. Preserve the transport contract
+  for partial I/O, would-block, orderly EOF, and errors. Keep entropy failure
+  behavior intact and do not reuse record tests' fake entropy success stubs.
 - Keep socket destination routing separate from the TLS server name used for
   SNI and hostname validation. Test-only trust anchors and validity-time
   configuration must retain chain, hostname, CertificateVerify, Finished, and
@@ -201,7 +211,8 @@ host CPU behavior cannot establish Open Transport or PowerPC correctness.
   failures even if a separate baseline-comparison mode accepts exact recorded
   cases for regression checking.
 - Exercise representative valid and invalid exchanges in a Retro68-built guest
-  using Open Transport and the cooperative event loop. Guest job dispatch must
+  using Open Transport, the cooperative event loop, and the existing provisioned
+  trusted seed-file helper. Guest job dispatch must
   not bypass the TLS implementation. Native results do not substitute for
   target smoke checks when platform or pump behavior changes.
 - Revisit the platform boundary if it grows into a public portability API or

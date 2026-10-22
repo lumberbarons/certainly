@@ -8,8 +8,9 @@
 
 Certainly maintainers need repeatable evidence that the library accepts valid
 TLS 1.3 connections and rejects invalid protocol exchanges. Existing tests cover
-key-schedule vectors and HTTP handling, but do not exercise complete handshakes
-or hostile peers. This work adds a reproducible conformance-testing workflow,
+key-schedule vectors, HTTP handling, trusted entropy, and record boundaries,
+including the real pump with fake transport, but do not exercise complete
+connections to an independent hostile peer. This work adds a reproducible conformance-testing workflow,
 actionable failure reports, and a small check on the actual Mac OS 9 target.
 
 ## Prior Decisions
@@ -53,8 +54,13 @@ actionable failure reports, and a small check on the actual Mac OS 9 target.
   from the socket destination. Do not edit generated production CA roots.
 - One active test and one handshake at a time is sufficient initially. A suite
   test may trigger multiple fresh connections; each needs its own attempt ID.
-- The host harness uses OS randomness and a monotonic timer. It records build
-  and fixture inputs; reproducibility does not require deterministic TLS keys.
+- Reuse the existing host Mac-header stubs, BearSSL build, and portable trusted
+  entropy implementation. The host harness registers an OS-backed trusted
+  entropy provider and uses a monotonic timer; it does not copy the fake entropy
+  success stubs from record-boundary tests. The guest uses the existing seed-file
+  helper with a provisioned trusted seed. Missing or failed trusted entropy
+  remains a setup error before key generation. Record build and fixture inputs;
+  reproducibility does not require deterministic TLS keys.
 - A user-supplied, booted Mac OS 9 emulator is available for the final milestone.
   The guest polls a host controller for fixed connection jobs, avoiding inbound
   guest networking and assumptions about shared filesystem support.
@@ -110,8 +116,8 @@ a later run.
 
 ### US1
 
-- [ ] T001 Isolate the minimum platform declarations needed for a native test build, keeping protocol and pump behavior shared — `include/certainly.h`, `src/certainly_internal.h`, `src/ot_transport.h`, `src/certainly.c`
-- [ ] T002 Add a host build of the complete client and platform adapters for nonblocking sockets, partial reads/writes, would-block, EOF, errors, allocation, 60 Hz ticks, and OS entropy; include adapter checks that distinguish these conditions — `tests/host/Makefile`, `tests/host/platform/`, `src/entropy.h`
+- [ ] T001 Reuse the existing host Mac-header stubs and isolate any additional declarations needed for a complete native client build, keeping protocol and pump behavior shared — `tests/host/stubs/`, `include/certainly.h`, `src/certainly_internal.h`, `src/ot_transport.h`, `src/certainly.c`
+- [ ] T002 Extend the host BearSSL build with adapters for nonblocking sockets, partial reads/writes, would-block, EOF, errors, allocation, and 60 Hz ticks; register OS randomness through the existing trusted provider API while retaining portable entropy.c, and check adapter error semantics — `tests/host/Makefile`, `tests/host/stubs/`, `tests/host/platform/`, `src/entropy.h`, `include/certainly.h`
 - [ ] T003 Add test-only certificate fixtures and internal configuration for trust anchors, validity time, TLS hostname, and destination routing; retain chain, hostname, and CertificateVerify verification — `tests/conformance/fixtures/`, `src/certainly_internal.h`, `src/certainly.c`
 - [ ] T004 Build a bounded command-line client with handshake-only and application-data modes, fresh connection state, TLS-version checks, and structured attempt logs; expose detailed TLS 1.3 errors internally where the existing accessor is insufficient — `tests/conformance/certainly_client.c`, `src/certainly.c`, `src/tls13_handshake.h`
 - [ ] T005 Prove the host client against a controlled reference server with trusted success, wrong-hostname/untrusted rejection, both advertised TLS 1.3 suites, application-data exchange, and injected partial I/O — `tests/conformance/check-client.sh`, `tests/host/platform/`, `tests/host/Makefile`
@@ -131,7 +137,7 @@ a later run.
 
 ### US4
 
-- [ ] T013 Add a Retro68 test app that reuses the fixture configuration and Certainly library, polls the controller using Open Transport, performs fixed allowlisted connection jobs, reports TLS/error/data outcomes, and yields through WaitNextEvent — `examples/conformance/`, `CMakeLists.txt`
+- [ ] T013 Add a Retro68 test app that reuses the fixture configuration, Certainly library, and existing trusted seed-file helper, polls the controller using Open Transport, performs fixed allowlisted connection jobs, reports TLS/error/data outcomes, and yields through WaitNextEvent — `examples/conformance/`, `examples/common/seed_file.c`, `CMakeLists.txt`
 - [ ] T014 Add a guest backend to the controller and trigger, with unique run/attempt IDs, single-job dispatch, guest readiness checks, deadlines, cancellation acknowledgement, and rejection of stale results — `tests/conformance/controller.py`, `tests/conformance/trigger-client.sh`
 - [ ] T015 Verify the guest-to-host control and TLS addresses under the existing emulator NAT setup, then rerun the valid and invalid smoke cases on PowerPC and retain comparable reports; document any target-only differences — `tests/conformance/run-anvil.sh`, `docs/EMULATORS.md`, `tests/conformance/README.md`
 
@@ -144,6 +150,7 @@ a later run.
 
 - [ ] Following the documented prerequisites, a clean native build uses no Retro68 headers, and existing host tests still pass; a separate Retro68 build still produces the library and example apps.
 - [ ] The native client negotiates TLS 1.3 and exchanges an exact known payload with a trusted local peer using each currently advertised TLS 1.3 cipher suite; the same fixture fails for a wrong hostname or an untrusted certificate.
+- [ ] Both host and guest use the production trusted-entropy requirement; a missing or failed provider/seed produces an entropy setup error before key generation and never counts as successful protocol rejection.
 - [ ] Limiting transport reads/writes to small chunks and injecting would-block conditions preserves the positive exchange, while orderly EOF, reset, and a stalled peer terminate with distinct logged outcomes within the configured deadline plus a documented cleanup allowance.
 - [ ] One documented command runs a pinned TLS-Anvil smoke selection containing a valid exchange and an invalid handshake and saves both raw suite reports and client attempts; a single selected test can be reproduced without running the wider profile.
 - [ ] The invalid smoke case demonstrably reaches the intended protocol check and its expected alert/closure is evaluated by TLS-Anvil; a certificate setup failure, crash, or timeout cannot count as that case passing. If Certainly has a protocol defect, the smoke run retains it as a visible failure.
