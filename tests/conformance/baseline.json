@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "suite_revision": "e9e9ac7160789d66736d36f3bc62430f6a49d497",
+  "profile": "wide",
+  "recorded": "2026-10-22",
+  "known_failures": [
+    {
+      "test_id": "8446-2R6GNvoUEs",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "RecordLayer.zeroLengthRecord_Finished",
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 5.1: a zero-length handshake record must end the connection with unexpected_message. The record layer accepts it, so the handshake completes."
+    },
+    {
+      "test_id": "8446-6dvAUhLdUW",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "Extensions.sendHeartBeatExtensionInSH",
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 4.2: an extension not allowed in the message it appears in must abort the handshake with illegal_parameter. ServerHello extension handling ignores a heartbeat extension that the ClientHello did not offer."
+    },
+    {
+      "test_id": "8446-Dy4H1oQ8bc",
+      "verdict": "PARTIALLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "KeyUpdate.sendUnknownRequestMode",
+      "evidence": "Client outcome handshake-error with BR_ERR_UNEXPECTED after the handshake completed, in every case. The suite fails the cases where it expects illegal_parameter.",
+      "explanation": "RFC 8446 section 4.6.3: an unknown request_update value must end the connection with illegal_parameter. Certainly rejects every post-handshake KeyUpdate as unexpected, so it neither updates keys nor distinguishes invalid values. The verdict is partial because some cases accept closure in any form."
+    },
+    {
+      "test_id": "8446-J6tVdjJCzF",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "KeyUpdate.respondsWithValidKeyUpdate",
+      "evidence": "Client outcome handshake-error with BR_ERR_UNEXPECTED after the handshake completed, in every case; the suite never received the expected KeyUpdate.",
+      "explanation": "RFC 8446 section 4.6.3: a receiver of update_requested must answer with its own KeyUpdate. KeyUpdate is mandatory to implement; src/tls13_handshake.c treats it as a connection close instead."
+    },
+    {
+      "test_id": "8446-U5uSdqYohP",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "EncryptedExtensions.sendPaddingExtensionInEE",
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 4.3.1: the client must reject forbidden extensions in EncryptedExtensions with illegal_parameter. The EncryptedExtensions parser skips extensions it does not use without checking that they are permitted there."
+    },
+    {
+      "test_id": "8446-X68SWFRBVS",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "EncryptedExtensions.sendSupportedVersionsExtensionInEE",
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 4.3.1: the client must reject forbidden extensions in EncryptedExtensions with illegal_parameter. A supported_versions extension there is accepted."
+    },
+    {
+      "test_id": "8446-bejcyb2cLf",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "ClientAuthentication.clientSendsCertificateAndFinMessage",
+      "evidence": "Every failing case: the client completed the handshake without sending Certificate after a CertificateRequest; the suite received Finished directly (outcome success, TLS 1.3 state Complete).",
+      "explanation": "RFC 8446 section 4.4.2: when the server requests client authentication and no certificate is available, the client must send a Certificate message with no certificates before Finished. src/tls13_handshake.c notes the CertificateRequest and defers the empty Certificate reply. Client certificates themselves are out of scope; the empty reply is not."
+    },
+    {
+      "test_id": "8446-fFh7mHrXow",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "KeyUpdate.appDataUnderNewKeysSucceeds",
+      "evidence": "Client outcome handshake-error with BR_ERR_UNEXPECTED after the handshake completed, in every case.",
+      "explanation": "RFC 8446 section 4.6.3: a receiver of KeyUpdate must update its receiving keys and keep exchanging data. Certainly closes the connection instead of rekeying."
+    },
+    {
+      "test_id": "8446-guYpWN18yk",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "Extensions.sendAdditionalExtension",
+      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
+      "explanation": "RFC 8446 section 4.2: an extension response with no matching request must abort the handshake with unsupported_extension. Unsolicited extensions are ignored."
+    },
+    {
+      "test_id": "8446-xhexdB876E",
+      "verdict": "FULLY_FAILED",
+      "kind": "protocol-defect",
+      "test": "ComplianceRequirements.supportsSecp256r1",
+      "evidence": "Discovery-evaluated: the suite's scan of the ClientHello found no secp256r1 key share or supported group; X25519 is the only group offered. No connection is made for this verdict.",
+      "explanation": "RFC 8446 section 9.1: a TLS-compliant application must support key exchange with secp256r1. The TLS 1.3 handshake implements X25519 only, which also leaves the suite's HelloRetryRequest templates inapplicable."
+    }
+  ]
+}

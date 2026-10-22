@@ -118,6 +118,316 @@ class Reports(unittest.TestCase):
             c.correlate(test, attempts)
 
 
+class Profiles(unittest.TestCase):
+    def profile(self, **changes):
+        base = {"testIds": ["T-a", "T-b"],
+                "excluded": [{"id": "T-x", "kind": "optional-feature", "reason": "no resumption"}],
+                "categories": {"negotiation": {"tests": ["T-a"]},
+                               "resumption": {"tests": [], "excluded": ["T-x"]}},
+                "uncovered": [{"category": "client authentication", "reason": "out of scope"}]}
+        return dict(base, **changes)
+
+    def test_valid_profile_is_accepted(self):
+        c.validate_profile(self.profile(tolerateOutcomes={"T-a": ["timeout", "certificate-error"]},
+                                        allowInapplicable=True, allowDiscoveryOnly=True))
+        c.validate_profile(self.profile(excluded=[{"id": "T-x", "kind": "out-of-scope", "reason": "r"}],
+                                        categories={}))
+        c.validate_profile({"testIds": ["T-a"]})
+
+    def test_malformed_profiles_are_rejected(self):
+        bad = [{"testIds": []}, {"testIds": ["T-a", "T-a"]}, {"testIds": ["has space"]},
+               {"testIds": "T-a"},
+               self.profile(excluded=[{"id": "T-a", "kind": "optional-feature", "reason": "r"}]),
+               self.profile(excluded=[{"id": "T-x", "kind": "because", "reason": "r"}]),
+               self.profile(excluded=[{"id": "T-x", "kind": "optional-feature", "reason": ""}]),
+               self.profile(excluded=[{"id": "T-x", "kind": "optional-feature", "reason": "r"},
+                                      {"id": "T-x", "kind": "optional-feature", "reason": "r"}]),
+               self.profile(categories={"n": {"tests": ["T-unknown"]}}),
+               self.profile(categories={"n": {"tests": [], "excluded": ["T-a"]}}),
+               self.profile(uncovered=[{"category": "x"}]),
+               self.profile(tolerateOutcomes={"T-unknown": ["timeout"]}),
+               self.profile(tolerateOutcomes={"T-a": ["connect-error"]}),
+               self.profile(tolerateOutcomes={"T-a": "timeout"}),
+               self.profile(allowInapplicable="yes"), self.profile(allowDiscoveryOnly=1)]
+        for profile in bad:
+            with self.subTest(profile=profile), self.assertRaises(c.HarnessError):
+                c.validate_profile(profile)
+
+    def test_shipped_profiles_are_valid(self):
+        for path in sorted((c.HERE / "profiles").glob("*.json")):
+            with self.subTest(profile=path.name):
+                c.validate_profile(json.loads(path.read_text()))
+                self.assertEqual(c.load_profile(path.stem)[0]["name"], path.stem)
+
+    def test_unknown_or_path_like_profile_names_are_rejected(self):
+        for name in ("missing", "../smoke", "smoke/../smoke", ""):
+            with self.subTest(name=name), self.assertRaises(c.HarnessError):
+                c.load_profile(name)
+
+
+class Inventory(unittest.TestCase):
+    def row(self, test_id, package, version="{TLS13})", disabled=False, method_version=None):
+        return {"id": test_id, "class": f"de.rub.nds.tlstest.suite.tests.{package}.Thing",
+                "method": "m", "class_annotations": [], "method_annotations": ["Disabled"] if disabled else [],
+                "class_tls_version": f"@x.TlsVersion(supported={{{version}", "method_tls_version": method_version,
+                "method_condition": None}
+
+    def test_only_tls13_client_and_shared_templates_are_applicable(self):
+        rows = [self.row("A", "client.tls13.rfc8446"), self.row("B", "both.tls13.rfc8446"),
+                self.row("C", "server.tls13.rfc8446"), self.row("D", "client.tls12.rfc5246", "TLS12, DTLS12})"),
+                self.row("E", "both.lengthfield", "TLS12, TLS13})"),
+                self.row("F", "client.dtls.rfc6347", "DTLS12})")]
+        self.assertEqual([r["id"] for r in c.applicable_tls13_client(rows)], ["A", "B", "E"])
+
+    def test_server_only_templates_are_not_applicable(self):
+        server = self.row("S", "both.lengthfield.extensions")
+        server["class_annotations"] = ["ServerTest"]
+        client = self.row("C", "both.lengthfield")
+        client["method_annotations"] = ["ClientTest"]
+        both = dict(self.row("B", "both.lengthfield"), class_annotations=["ClientTest", "ServerTest"])
+        self.assertEqual([r["id"] for r in c.applicable_tls13_client([server, client, both])], ["C", "B"])
+
+    def test_method_version_overrides_class_version(self):
+        rows = [self.row("A", "both.lengthfield", "TLS12, TLS13})", method_version="@x.TlsVersion(supported={TLS12})"),
+                self.row("B", "both.lengthfield", "TLS12})", method_version="@x.TlsVersion(supported={TLS13})")]
+        self.assertEqual([r["id"] for r in c.applicable_tls13_client(rows)], ["B"])
+
+    def test_every_applicable_template_must_be_executed_or_excluded(self):
+        rows = [self.row(i, "client.tls13.rfc8446") for i in ("A", "B", "C")]
+        profile = {"testIds": ["A"], "excluded": [{"id": "B", "kind": "optional-feature", "reason": "r"}]}
+        report = c.check_inventory(rows, profile)
+        self.assertEqual(report["unclassified"], ["C"])
+        self.assertEqual((report["executed"], report["excluded"]), (1, 1))
+        self.assertFalse(report["ok"])
+
+    def test_profile_entries_unknown_to_the_suite_are_reported(self):
+        rows = [self.row("A", "client.tls13.rfc8446")]
+        report = c.check_inventory(rows, {"testIds": ["A", "GONE"],
+            "excluded": [{"id": "SERVER", "kind": "optional-feature", "reason": "r"}]})
+        self.assertEqual(sorted(report["unknown"]), ["GONE", "SERVER"])
+        self.assertFalse(report["ok"])
+
+    def test_complete_classification_is_ok_and_counts_uncovered_categories(self):
+        rows = [self.row(i, "client.tls13.rfc8446") for i in ("A", "B")]
+        profile = {"testIds": ["A"], "excluded": [{"id": "B", "kind": "harness-limitation", "reason": "r"}],
+                   "uncovered": [{"category": "x", "reason": "r"}]}
+        report = c.check_inventory(rows, profile)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["excluded_by_kind"], {"harness-limitation": 1})
+        self.assertEqual(report["uncovered"], ["x"])
+
+    def test_statically_disabled_templates_must_still_be_accounted_for(self):
+        rows = [self.row("A", "client.tls13.rfc8446", disabled=True)]
+        self.assertEqual(c.check_inventory(rows, {"testIds": ["Z"]})["unclassified"], ["A"])
+
+
+class Profile(unittest.TestCase):
+    """A bad test must cost one test, not the run; setup problems must not look like passes."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.run = Path(self.temporary.name)
+        self.args = argparse.Namespace(total_timeout=600, backend="certainly")
+        self.calls = []
+
+    def execute(self, behaviours, **kwargs):
+        def fake(args, lock, jar, anchors, run, test_id, **options):
+            self.calls.append(test_id)
+            behaviour = behaviours.get(test_id, "ok")
+            if isinstance(behaviour, BaseException):
+                raise behaviour
+            return {"test_id": test_id, "verdict": c.STRICT, "cases": 1, "evidence_errors": []}
+        with patch.object(c, "run_test", fake):
+            return c.execute(self.args, {}, None, None, self.run, list(behaviours), **kwargs)
+
+    def test_one_harness_failure_does_not_stop_the_remaining_tests(self):
+        results = self.execute({"a": "ok", "b": c.HarnessError("cannot correlate"), "c": "ok"})
+        self.assertEqual(self.calls, ["a", "b", "c"])
+        self.assertEqual([r["test_id"] for r in results], ["a", "b", "c"])
+        self.assertEqual(results[1]["harness_error"], "cannot correlate")
+        self.assertNotIn("verdict", results[1])
+        self.assertEqual(results[2]["verdict"], c.STRICT)
+
+    def test_unreadable_reports_are_recorded_not_raised(self):
+        results = self.execute({"a": ValueError("bad json"), "b": OSError("gone")})
+        self.assertEqual([bool(r.get("harness_error")) for r in results], [True, True])
+
+    def test_repeated_harness_failures_stop_the_run_and_record_the_rest(self):
+        ids = {f"t{i}": c.HarnessError("java is broken") for i in range(c.MAX_CONSECUTIVE_FAILURES + 3)}
+        results = self.execute(ids)
+        self.assertEqual(len(self.calls), c.MAX_CONSECUTIVE_FAILURES)
+        self.assertEqual(len(results), len(ids))
+        self.assertIn("not run", results[-1]["harness_error"])
+
+    def test_a_pass_resets_the_consecutive_failure_count(self):
+        behaviours = {}
+        for i in range(c.MAX_CONSECUTIVE_FAILURES + 2):
+            behaviours[f"t{i}"] = c.HarnessError("x") if i % 2 == 0 else "ok"
+        self.execute(behaviours)
+        self.assertEqual(len(self.calls), len(behaviours))
+
+    def test_total_deadline_records_unstarted_tests_as_not_run(self):
+        self.args.total_timeout = 0
+        results = self.execute({"a": "ok", "b": "ok"})
+        self.assertEqual(self.calls, [])
+        self.assertTrue(all("not run" in r["harness_error"] and "deadline" in r["harness_error"]
+                            for r in results))
+
+    def test_interruption_stops_the_run_but_keeps_finished_results(self):
+        results = self.execute({"a": "ok", "b": c.Interrupted("interrupted by signal 15"), "c": "ok"})
+        self.assertEqual(self.calls, ["a", "b"])
+        self.assertEqual([r["test_id"] for r in results], ["a", "b", "c"])
+        self.assertEqual(results[0]["verdict"], c.STRICT)
+        self.assertIn("interrupted", results[1]["harness_error"])
+        self.assertIn("not run", results[2]["harness_error"])
+
+
+class InapplicableTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+        self.report = {"Running": False, "TotalTests": 1, "FinishedTests": 1, "DisabledTests": 1,
+                       "TestCaseCount": 0, "TestSuiteErrorTests": 0}
+        self.test = {"TestId": "T", "CaseCount": 0, "Result": "DISABLED", "TestCases": [],
+                     "DisabledReason": "PSKModeExtension is not supported"}
+        self.path = self.directory / "results/T/_testRun.json"
+        self.path.parent.mkdir(parents=True)
+
+    def save(self):
+        c.write_json(self.directory / "report.json", self.report)
+        c.write_json(self.path, self.test)
+
+    def test_disabled_test_is_an_inapplicable_result_only_when_allowed(self):
+        self.save()
+        _, test = c.validate_reports(self.directory, "T", allow_inapplicable=True)
+        self.assertEqual(test["Result"], "DISABLED")
+        with self.assertRaises(c.HarnessError):
+            c.validate_reports(self.directory, "T")
+
+    def test_disabled_test_without_a_reason_or_with_cases_is_a_harness_failure(self):
+        for change in ({"DisabledReason": None}, {"DisabledReason": ""},
+                       {"CaseCount": 1, "TestCases": [{"Result": "DISABLED"}]}):
+            with self.subTest(change=change):
+                self.test = dict(self.test, **change)
+                self.save()
+                with self.assertRaises(c.HarnessError):
+                    c.validate_reports(self.directory, "T", allow_inapplicable=True)
+
+
+class Correlation(unittest.TestCase):
+    def case(self):
+        return {"DstPort": 5001, "uuid": "case-1", "StartTimestamp": "1970-01-01T00:00:01Z",
+                "EndTimestamp": "1970-01-01T00:00:02Z"}
+
+    def attempt(self, outcome):
+        return dict(attempt="a1", local_port=5001, started_ns=1_000_000_000, result={"outcome": outcome})
+
+    def test_unlisted_client_failures_are_harness_failures(self):
+        for outcome in ("timeout", "connect-error", "certificate-error"):
+            with self.subTest(outcome=outcome), self.assertRaises(c.HarnessError):
+                c.correlate({"TestId": "T", "TestCases": [self.case()]}, [self.attempt(outcome)])
+
+    def test_a_listed_outcome_is_tolerated_but_connect_errors_never_are(self):
+        test = {"TestId": "T", "TestCases": [self.case()]}
+        for outcome in ("timeout", "certificate-error"):
+            with self.subTest(outcome=outcome):
+                executed = c.correlate(test, [self.attempt(outcome)], tolerate={outcome})
+                self.assertEqual(len(executed), 1)
+        with self.assertRaises(c.HarnessError):
+            c.correlate(test, [self.attempt("connect-error")], tolerate={"connect-error", "timeout"})
+
+    def test_tolerating_one_outcome_does_not_tolerate_another(self):
+        with self.assertRaises(c.HarnessError):
+            c.correlate({"TestId": "T", "TestCases": [self.case()]}, [self.attempt("timeout")],
+                        tolerate={"certificate-error"})
+
+    def test_tolerated_timeout_is_still_a_killed_client_not_a_clean_one(self):
+        attempt = dict(self.attempt("timeout"), watchdog_timeout=True)
+        with self.assertRaises(c.HarnessError):
+            c.correlate({"TestId": "T", "TestCases": [self.case()]}, [attempt], tolerate={"timeout"})
+
+    def test_certificate_rejection_must_be_at_the_certificate_message(self):
+        attempt = {"attempt": "a", "result": {"outcome": "certificate-error", "tls13_state": "RecvCertificate"}}
+        self.assertEqual(c.verify_stage("certainly", "T", [attempt]), [])
+        attempt["result"]["tls13_state"] = "RecvCertificateVerify"
+        self.assertTrue(c.verify_stage("certainly", "T", [attempt]))
+
+
+class DiscoveryEvaluated(unittest.TestCase):
+    """Some templates judge the ClientHello seen during discovery and open no connection."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+        self.report = {"Running": False, "TotalTests": 1, "FinishedTests": 1, "TestCaseCount": 0,
+                       "TestSuiteErrorTests": 0, "StrictlySucceededTests": 1}
+        self.test = {"TestId": "T", "CaseCount": 0, "Result": c.STRICT, "TestCases": []}
+        self.path = self.directory / "results/T/_testRun.json"
+        self.path.parent.mkdir(parents=True)
+
+    def save(self):
+        c.write_json(self.directory / "report.json", self.report)
+        c.write_json(self.path, self.test)
+
+    def test_zero_case_verdict_needs_explicit_permission(self):
+        self.save()
+        _, test = c.validate_reports(self.directory, "T", allow_discovery_only=True)
+        self.assertEqual(test["Result"], c.STRICT)
+        with self.assertRaises(c.HarnessError):
+            c.validate_reports(self.directory, "T")
+
+    def test_failing_zero_case_verdicts_keep_their_verdict(self):
+        self.report.update(StrictlySucceededTests=0, FullyFailedTests=1)
+        self.test["Result"] = "FULLY_FAILED"
+        self.save()
+        _, test = c.validate_reports(self.directory, "T", allow_discovery_only=True)
+        self.assertEqual(test["Result"], "FULLY_FAILED")
+
+    def test_inconsistent_zero_case_reports_are_rejected(self):
+        for change in ({"StrictlySucceededTests": 0}, {"FinishedTests": 0}, {"Running": True},
+                       {"TestSuiteErrorTests": 1}, {"TotalTests": 2}):
+            with self.subTest(change=change):
+                self.report = {"Running": False, "TotalTests": 1, "FinishedTests": 1, "TestCaseCount": 0,
+                               "TestSuiteErrorTests": 0, "StrictlySucceededTests": 1}
+                self.report.update(change)
+                self.save()
+                with self.assertRaises(c.HarnessError):
+                    c.validate_reports(self.directory, "T", allow_discovery_only=True)
+
+    def test_unknown_verdicts_are_rejected_even_without_cases(self):
+        self.test["Result"] = "TEST_SUITE_ERROR"
+        self.save()
+        with self.assertRaises(c.HarnessError):
+            c.validate_reports(self.directory, "T", allow_discovery_only=True)
+
+
+class PortProbe(unittest.TestCase):
+    def test_busy_port_is_reported_by_number(self):
+        import socket
+        with socket.socket() as busy:
+            busy.bind(("127.0.0.1", 0))
+            busy.listen(1)
+            port = busy.getsockname()[1]
+            with self.assertRaisesRegex(c.HarnessError, f"port {port}"):
+                c.check_port(port)
+
+    def test_port_left_in_time_wait_by_a_previous_run_is_usable(self):
+        import socket
+        with socket.socket() as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            port = server.getsockname()[1]
+            client = socket.create_connection(("127.0.0.1", port))
+            connection, _ = server.accept()
+            connection.close()  # the side that closes first keeps the TIME_WAIT entry
+            client.close()
+        c.check_port(port)
+
+
 class Lifecycle(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

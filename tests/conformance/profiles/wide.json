@@ -1,0 +1,359 @@
+{
+  "name": "wide",
+  "allowInapplicable": true,
+  "allowDiscoveryOnly": true,
+  "tolerateOutcomes": {
+    "8446-cM4fvnBMce": [
+      "certificate-error"
+    ],
+    "8446-h4RyAhoVZy": [
+      "timeout"
+    ]
+  },
+  "testIds": [
+    "8446-2L9AK4xSva",
+    "8446-2R6GNvoUEs",
+    "8446-2v6S87AwgY",
+    "8446-2yeDE1Bso6",
+    "8446-34CYsV98Fs",
+    "8446-4vT4QZyhRd",
+    "8446-5E3CVBTFdt",
+    "8446-5NRGuXE3Em",
+    "8446-6X9hLRk9V4",
+    "8446-6dvAUhLdUW",
+    "8446-7byKPGEA8Q",
+    "8446-Agnoga6SCd",
+    "8446-AptaW3C62X",
+    "8446-BbKKCCtSdd",
+    "8446-BkyuGXzztX",
+    "8446-C9aFBzrCbX",
+    "8446-CFyJvy1SNZ",
+    "8446-CZWhi6PJvQ",
+    "8446-Dy4H1oQ8bc",
+    "8446-EmE5eWBxE7",
+    "8446-F9bWYMiB45",
+    "8446-FnJguFLqcc",
+    "8446-FviCUju7gw",
+    "8446-GNEMTQXXpq",
+    "8446-GXAiyehrdF",
+    "8446-HKxd74FVbC",
+    "8446-J6tVdjJCzF",
+    "8446-JKvCjP5mKE",
+    "8446-KAEXNq6tsi",
+    "8446-KLkH56oYzC",
+    "8446-LNoEKntfip",
+    "8446-NYgNsg97bX",
+    "8446-PDB3U8CTKu",
+    "8446-PN89HSERKp",
+    "8446-Q2RbRWjAdJ",
+    "8446-Q8Xknkk2vi",
+    "8446-QxfMDM9cBK",
+    "8446-TyCkZKkVMt",
+    "8446-TyxxKdqwv3",
+    "8446-U5uSdqYohP",
+    "8446-V3SF3rXAAW",
+    "8446-VNQgpDNZVS",
+    "8446-VkKqN54gN1",
+    "8446-WtTcgsZFA3",
+    "8446-X68SWFRBVS",
+    "8446-XDu7chdPTM",
+    "8446-YMYRto48Jg",
+    "8446-aUT8tc8oYz",
+    "8446-bejcyb2cLf",
+    "8446-bfziReZMw4",
+    "8446-cEg5hNM3Lm",
+    "8446-cM4fvnBMce",
+    "8446-cck1BzgJ1h",
+    "8446-dZhHUctEjQ",
+    "8446-dyTnCEsFo1",
+    "8446-eMuKxJmUfq",
+    "8446-eNP4DYhWjk",
+    "8446-f3pZavKkyP",
+    "8446-fFh7mHrXow",
+    "8446-guYpWN18yk",
+    "8446-h4RyAhoVZy",
+    "8446-hKUhsUFCnx",
+    "8446-i8hwrTotPM",
+    "8446-k8Fht68Dq2",
+    "8446-m6iEnsoJCw",
+    "8446-n1veCSRVjQ",
+    "8446-ncR52WSgGx",
+    "8446-nvo5NZdCUK",
+    "8446-o5uxfywWFS",
+    "8446-oEdBWdqUnm",
+    "8446-oN7MGas4sq",
+    "8446-oysw9PbeiT",
+    "8446-qN6nNMX9Sx",
+    "8446-qNaBPZ4ofA",
+    "8446-qibaoRRFDr",
+    "8446-s2k4bG3Gz9",
+    "8446-t4AtKzmU9J",
+    "8446-u9JfnwgsWH",
+    "8446-vN4oMaYkC6",
+    "8446-vU6BQin9Eo",
+    "8446-vbFRZNusey",
+    "8446-w9k9gMLaeU",
+    "8446-xhexdB876E",
+    "8446-zUe5jnQtoN",
+    "8446-zgsrCx4EDP",
+    "8701-9F3St2di12",
+    "8701-NczJT3TSj4",
+    "8701-pVCWxJraM8",
+    "8701-q8vvYUsUCu",
+    "8701-xwVd59Y3Fq",
+    "XLF-9xtqzkYrTD",
+    "XLF-Ax6kVTgheY",
+    "XLF-CALCiXbvRo",
+    "XLF-PkwVF7pRQa",
+    "XLF-RUoZsBa3n4",
+    "XLF-SA1CoksBgE",
+    "XLF-YEP4C4ruSR",
+    "XLF-c4Db7ctU7V",
+    "XLF-hjh8QDJmvK",
+    "XLF-ia3wstdqYe",
+    "XLF-tSjRqK81S8",
+    "XLF-uQXeugeUkb",
+    "XLF-ujMXSAMmVF",
+    "XSM-2iKDTUhXF5",
+    "XSM-F8VTZ3optN",
+    "XSM-FLPgMqSvg9",
+    "XSM-LdxAqeL2Te",
+    "XSM-LrxDfiLZM5",
+    "XSM-TQQj27kntr",
+    "XSM-Xb6pAYY3fT",
+    "XSM-aWBzNYEKwz",
+    "XSM-gN2Mz9wD2D",
+    "XSM-gN61eQrmNv",
+    "XSM-iTKLQBFN9A",
+    "XSM-sHFfpjZxQh",
+    "XSM-tGmYudnsgE"
+  ],
+  "excluded": [
+    {
+      "id": "8446-BSsVDoM82Z",
+      "kind": "harness-limitation",
+      "reason": "Varies the server certificate and signature algorithm; the fixed exported chain cannot match the key the suite signs with, so every case fails at CertificateVerify (BR_ERR_BAD_SIGNATURE) before the behaviour under test. The OpenSSL reference client also rejects the handshake in every case, so the behaviour under test is never reached."
+    },
+    {
+      "id": "8446-V9hFSg6hoE",
+      "kind": "harness-limitation",
+      "reason": "Varies the server certificate and signature algorithm; the fixed exported chain cannot match the key the suite signs with, so every case fails at CertificateVerify (BR_ERR_BAD_SIGNATURE) before the behaviour under test. The OpenSSL reference client also rejects the handshake in every case, so the behaviour under test is never reached."
+    },
+    {
+      "id": "8446-YDjQAqZ2LM",
+      "kind": "out-of-scope",
+      "reason": "The server selects TLS 1.2 and Certainly falls back to a TLS 1.2 handshake by design, so the library's TLS 1.2 path decides the verdict. TLS 1.2 behaviour is outside this profile."
+    },
+    {
+      "id": "8446-b7XLVJA8Pn",
+      "kind": "harness-limitation",
+      "reason": "Varies the server certificate and signature algorithm; the fixed exported chain cannot match the key the suite signs with, so every case fails at CertificateVerify (BR_ERR_BAD_SIGNATURE) before the behaviour under test. The OpenSSL reference client also rejects the handshake in every case, so the behaviour under test is never reached."
+    },
+    {
+      "id": "8446-i9pq4Yt8pz",
+      "kind": "harness-limitation",
+      "reason": "Varies the server certificate and signature algorithm; the fixed exported chain cannot match the key the suite signs with, so every case fails at CertificateVerify (BR_ERR_BAD_SIGNATURE) before the behaviour under test. The OpenSSL reference client also rejects the handshake in every case, so the behaviour under test is never reached."
+    },
+    {
+      "id": "8446-jVohiUKi4u",
+      "kind": "harness-limitation",
+      "reason": "Varies the server certificate and signature algorithm; the fixed exported chain cannot match the key the suite signs with, so every case fails at CertificateVerify (BR_ERR_BAD_SIGNATURE) before the behaviour under test. The OpenSSL reference client also rejects the handshake in every case, so the behaviour under test is never reached."
+    },
+    {
+      "id": "8446-v48HMDRHVT",
+      "kind": "upstream-disabled",
+      "reason": "Annotated @Disabled in the pinned suite; it never runs."
+    },
+    {
+      "id": "8701-91tcbyhyNk",
+      "kind": "harness-limitation",
+      "reason": "Varies the server certificate and signature algorithm; the fixed exported chain cannot match the key the suite signs with, so every case fails at CertificateVerify (BR_ERR_BAD_SIGNATURE) before the behaviour under test. The OpenSSL reference client also rejects the handshake in every case, so the behaviour under test is never reached."
+    }
+  ],
+  "categories": {
+    "negotiation": {
+      "tests": [
+        "8446-2yeDE1Bso6",
+        "8446-5E3CVBTFdt",
+        "8446-Agnoga6SCd",
+        "8446-CFyJvy1SNZ",
+        "8446-F9bWYMiB45",
+        "8446-FnJguFLqcc",
+        "8446-JKvCjP5mKE",
+        "8446-Q2RbRWjAdJ",
+        "8446-QxfMDM9cBK",
+        "8446-TyxxKdqwv3",
+        "8446-WtTcgsZFA3",
+        "8446-YMYRto48Jg",
+        "8446-cck1BzgJ1h",
+        "8446-eMuKxJmUfq",
+        "8446-eNP4DYhWjk",
+        "8446-h4RyAhoVZy",
+        "8446-nvo5NZdCUK",
+        "8446-o5uxfywWFS",
+        "8446-oEdBWdqUnm",
+        "8446-oysw9PbeiT",
+        "8446-qNaBPZ4ofA",
+        "8446-qibaoRRFDr",
+        "8446-u9JfnwgsWH",
+        "8446-w9k9gMLaeU",
+        "8446-xhexdB876E",
+        "8446-zgsrCx4EDP"
+      ],
+      "excluded": [
+        "8446-YDjQAqZ2LM",
+        "8446-jVohiUKi4u"
+      ]
+    },
+    "extensions and HelloRetryRequest": {
+      "tests": [
+        "8446-2L9AK4xSva",
+        "8446-2v6S87AwgY",
+        "8446-34CYsV98Fs",
+        "8446-5NRGuXE3Em",
+        "8446-6X9hLRk9V4",
+        "8446-6dvAUhLdUW",
+        "8446-7byKPGEA8Q",
+        "8446-C9aFBzrCbX",
+        "8446-FviCUju7gw",
+        "8446-KLkH56oYzC",
+        "8446-TyCkZKkVMt",
+        "8446-U5uSdqYohP",
+        "8446-X68SWFRBVS",
+        "8446-XDu7chdPTM",
+        "8446-bfziReZMw4",
+        "8446-dyTnCEsFo1",
+        "8446-f3pZavKkyP",
+        "8446-guYpWN18yk",
+        "8446-ncR52WSgGx",
+        "8446-qN6nNMX9Sx",
+        "8446-s2k4bG3Gz9",
+        "8446-t4AtKzmU9J",
+        "8446-vU6BQin9Eo",
+        "8701-9F3St2di12",
+        "8701-NczJT3TSj4",
+        "8701-pVCWxJraM8",
+        "8701-q8vvYUsUCu",
+        "8701-xwVd59Y3Fq"
+      ],
+      "excluded": [
+        "8446-v48HMDRHVT",
+        "8701-91tcbyhyNk"
+      ]
+    },
+    "record layer and fragmentation": {
+      "tests": [
+        "8446-2R6GNvoUEs",
+        "8446-BbKKCCtSdd",
+        "8446-VNQgpDNZVS",
+        "8446-i8hwrTotPM",
+        "8446-m6iEnsoJCw",
+        "XLF-9xtqzkYrTD",
+        "XLF-Ax6kVTgheY",
+        "XLF-CALCiXbvRo",
+        "XLF-PkwVF7pRQa",
+        "XLF-RUoZsBa3n4",
+        "XLF-SA1CoksBgE",
+        "XLF-YEP4C4ruSR",
+        "XLF-c4Db7ctU7V",
+        "XLF-hjh8QDJmvK",
+        "XLF-ia3wstdqYe",
+        "XLF-tSjRqK81S8",
+        "XLF-uQXeugeUkb",
+        "XLF-ujMXSAMmVF"
+      ]
+    },
+    "record authentication": {
+      "tests": [
+        "8446-BkyuGXzztX",
+        "8446-EmE5eWBxE7",
+        "8446-GNEMTQXXpq",
+        "8446-GXAiyehrdF",
+        "8446-PN89HSERKp",
+        "8446-V3SF3rXAAW",
+        "8446-aUT8tc8oYz",
+        "8446-hKUhsUFCnx",
+        "8446-n1veCSRVjQ",
+        "8446-vbFRZNusey"
+      ],
+      "excluded": [
+        "8446-BSsVDoM82Z",
+        "8446-i9pq4Yt8pz"
+      ]
+    },
+    "certificate authentication and Finished": {
+      "tests": [
+        "8446-AptaW3C62X",
+        "8446-CZWhi6PJvQ",
+        "8446-HKxd74FVbC",
+        "8446-LNoEKntfip",
+        "8446-NYgNsg97bX",
+        "8446-bejcyb2cLf",
+        "8446-cEg5hNM3Lm",
+        "8446-cM4fvnBMce",
+        "8446-dZhHUctEjQ",
+        "8446-oN7MGas4sq",
+        "8446-vN4oMaYkC6"
+      ]
+    },
+    "alerts and closure": {
+      "tests": [
+        "8446-4vT4QZyhRd",
+        "8446-PDB3U8CTKu",
+        "8446-Q8Xknkk2vi",
+        "8446-VkKqN54gN1",
+        "8446-k8Fht68Dq2",
+        "8446-zUe5jnQtoN"
+      ],
+      "excluded": [
+        "8446-V9hFSg6hoE"
+      ]
+    },
+    "post-handshake messages": {
+      "tests": [
+        "8446-Dy4H1oQ8bc",
+        "8446-J6tVdjJCzF",
+        "8446-KAEXNq6tsi",
+        "8446-fFh7mHrXow"
+      ],
+      "excluded": [
+        "8446-b7XLVJA8Pn"
+      ]
+    },
+    "handshake state machine": {
+      "tests": [
+        "XSM-2iKDTUhXF5",
+        "XSM-F8VTZ3optN",
+        "XSM-FLPgMqSvg9",
+        "XSM-LdxAqeL2Te",
+        "XSM-LrxDfiLZM5",
+        "XSM-TQQj27kntr",
+        "XSM-Xb6pAYY3fT",
+        "XSM-aWBzNYEKwz",
+        "XSM-gN2Mz9wD2D",
+        "XSM-gN61eQrmNv",
+        "XSM-iTKLQBFN9A",
+        "XSM-sHFfpjZxQh",
+        "XSM-tGmYudnsgE"
+      ]
+    }
+  },
+  "uncovered": [
+    {
+      "category": "certificate and signature-algorithm variation",
+      "reason": "The fixed exported certificate chain cannot follow the suite's certificate and signature-algorithm parameters; the templates that vary them are excluded as harness limitations."
+    },
+    {
+      "category": "client certificate authentication",
+      "reason": "Mutual TLS is out of scope; only the empty Certificate reply to a CertificateRequest is checked."
+    },
+    {
+      "category": "resumption and 0-RTT",
+      "reason": "Not implemented by Certainly and out of scope; the suite marks the dependent templates inapplicable."
+    },
+    {
+      "category": "TLS 1.2 interoperability",
+      "reason": "Out of scope; fallback to TLS 1.2 during a TLS 1.3 test is reported, not tested."
+    }
+  ]
+}

@@ -131,9 +131,9 @@ a later run.
 
 ### US3
 
-- [ ] T010 Inventory the pinned suite's applicable TLS 1.3 client cases and add a bounded wider profile covering negotiation, extensions/HRR, fragmentation, CertificateVerify/Finished, record authentication, alerts/closure, and post-handshake messages where available; record missing categories rather than implying coverage — `tests/conformance/profiles/`, `tests/conformance/README.md`
-- [ ] T011 Summarize upstream results and correlate attempts, retaining exact test identifiers, suite revision, source revision plus dirty state, fixture fingerprints, TLS version, errors, and reproduction commands — `tests/conformance/summarize.py`, `tests/conformance/controller.py`
-- [ ] T012 Record a baseline with exact case IDs, evidence, and explanations; distinguish optional-feature exclusions from protocol defects, flag changed outcomes and stale baseline entries, and verify failure/missing-report handling with small report fixtures — `tests/conformance/baseline.json`, `tests/conformance/summarize.py`, `tests/conformance/test_reports.py`
+- [x] T010 Inventory the pinned suite's applicable TLS 1.3 client cases and add a bounded wider profile covering negotiation, extensions/HRR, fragmentation, CertificateVerify/Finished, record authentication, alerts/closure, and post-handshake messages where available; record missing categories rather than implying coverage — `tests/conformance/profiles/`, `tests/conformance/README.md`
+- [x] T011 Summarize upstream results and correlate attempts, retaining exact test identifiers, suite revision, source revision plus dirty state, fixture fingerprints, TLS version, errors, and reproduction commands — `tests/conformance/summarize.py`, `tests/conformance/controller.py`
+- [x] T012 Record a baseline with exact case IDs, evidence, and explanations; distinguish optional-feature exclusions from protocol defects, flag changed outcomes and stale baseline entries, and verify failure/missing-report handling with small report fixtures — `tests/conformance/baseline.json`, `tests/conformance/summarize.py`, `tests/conformance/test_reports.py`
 
 ### US4
 
@@ -156,7 +156,7 @@ a later run.
 - [x] The invalid smoke case demonstrably reaches the intended protocol check and its expected alert/closure is evaluated by TLS-Anvil; a certificate setup failure, crash, or timeout cannot count as that case passing. If Certainly has a protocol defect, the smoke run retains it as a visible failure.
 - [x] Missing prerequisites, a failed trigger, zero executed tests, a missing/incomplete report, or a client that does not terminate cause a nonzero runner exit with a diagnostic, including cleanup of owned processes and sockets.
 - [x] Every native attempt has a unique ID and can be traced to a suite test or an explicitly labeled discovery attempt; artifacts identify suite/build/fixture inputs and whether TLS 1.2 fallback occurred.
-- [ ] The wider profile publishes executed and excluded case counts plus uncovered protocol categories, preserves upstream verdicts, and includes a single-case reproduction command for each failure.
-- [ ] An inventory run returns nonzero when protocol or harness failures occur. A separately named baseline-comparison mode can accept only exact recorded known protocol failures, always lists them, fails on new failures or harness failures, and flags improvements and stale entries for review.
+- [x] The wider profile publishes executed and excluded case counts plus uncovered protocol categories, preserves upstream verdicts, and includes a single-case reproduction command for each failure.
+- [x] An inventory run returns nonzero when protocol or harness failures occur. A separately named baseline-comparison mode can accept only exact recorded known protocol failures, always lists them, fails on new failures or harness failures, and flags improvements and stale entries for review.
 - [ ] The Mac OS 9 test app performs the same valid and invalid smoke scenarios through Open Transport, returns correlated results, and stays responsive to its event loop. A timed-out/cancelled job is acknowledged and closed before dispatching another; a stale result never completes a new attempt.
 - [ ] Documentation distinguishes host protocol coverage from Mac OS 9 platform coverage and records any known defect, including mandatory behavior such as KeyUpdate, without relabeling it as an optional feature.
