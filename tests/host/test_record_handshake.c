@@ -9,6 +9,8 @@
  * The tests snapshot everything that follows plain_buf and require it
  * to survive a rejected record unchanged.
  *
+ * It also checks the EncryptedExtensions extension validation.
+ *
  * Build and run on the HOST machine:
  *   cd tests/host && make test_record_handshake && ./test_record_handshake
  */
@@ -292,6 +294,50 @@ static void test_server_hello_over_limit(void)
     }
 }
 
+/* ── EncryptedExtensions extension validation ── */
+
+static void check_ee(const char *name, const unsigned char *list,
+                     size_t len, int want)
+{
+    int got = tls13_encrypted_extensions_valid(list, len);
+    CHECK(got == want, "EE extensions: %s: got %d, want %d", name, got, want);
+}
+
+static void test_encrypted_extensions_validation(void)
+{
+    static const unsigned char sni[] = {0x00, 0x00, 0x00, 0x00};
+    static const unsigned char groups[] = {0x00, 0x0a, 0x00, 0x02, 0x00, 0x1d};
+    static const unsigned char sni_groups[] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x02, 0x00, 0x1d};
+    static const unsigned char sni_twice[] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    static const unsigned char groups_twice[] = {
+        0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00};
+    static const unsigned char padding[] = {0x00, 0x15, 0x00, 0x01, 0x00};
+    static const unsigned char versions[] = {0x00, 0x2b, 0x00, 0x02, 0x03, 0x04};
+    static const unsigned char early_data[] = {0x00, 0x2a, 0x00, 0x00};
+    static const unsigned char sni_then_padding[] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00};
+    static const unsigned char short_header[] = {0x00, 0x00, 0x00};
+    static const unsigned char overrun[] = {0x00, 0x0a, 0x00, 0x04, 0x00, 0x1d};
+
+    check_ee("empty list", sni, 0, 1);
+    check_ee("server_name", sni, sizeof sni, 1);
+    check_ee("supported_groups", groups, sizeof groups, 1);
+    check_ee("server_name and supported_groups", sni_groups,
+             sizeof sni_groups, 1);
+    check_ee("duplicate server_name", sni_twice, sizeof sni_twice, 0);
+    check_ee("duplicate supported_groups", groups_twice,
+             sizeof groups_twice, 0);
+    check_ee("padding", padding, sizeof padding, 0);
+    check_ee("supported_versions", versions, sizeof versions, 0);
+    check_ee("early_data", early_data, sizeof early_data, 0);
+    check_ee("allowed then forbidden", sni_then_padding,
+             sizeof sni_then_padding, 0);
+    check_ee("truncated header", short_header, sizeof short_header, 0);
+    check_ee("extension data overruns list", overrun, sizeof overrun, 0);
+}
+
 int main(void)
 {
     size_t s;
@@ -304,6 +350,7 @@ int main(void)
         printf("done: %s\n", suites[s].name);
     }
     test_server_hello_over_limit();
+    test_encrypted_extensions_validation();
     if (failures) {
         printf("%d check(s) FAILED\n", failures);
         return 1;

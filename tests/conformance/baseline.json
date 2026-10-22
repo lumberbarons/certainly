@@ -49,28 +49,6 @@
       "explanation": "RFC 8446 section 4.6.3: a receiver of update_requested must answer with its own KeyUpdate. KeyUpdate is mandatory to implement; src/tls13_handshake.c treats it as a connection close instead."
     },
     {
-      "test_id": "8446-U5uSdqYohP",
-      "verdict": "FULLY_FAILED",
-      "kind": "protocol-defect",
-      "test": "EncryptedExtensions.sendPaddingExtensionInEE",
-      "signature": [
-        "success/Complete/None"
-      ],
-      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
-      "explanation": "RFC 8446 section 4.3.1: the client must reject forbidden extensions in EncryptedExtensions with illegal_parameter. The EncryptedExtensions parser skips extensions it does not use without checking that they are permitted there."
-    },
-    {
-      "test_id": "8446-X68SWFRBVS",
-      "verdict": "FULLY_FAILED",
-      "kind": "protocol-defect",
-      "test": "EncryptedExtensions.sendSupportedVersionsExtensionInEE",
-      "signature": [
-        "success/Complete/None"
-      ],
-      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
-      "explanation": "RFC 8446 section 4.3.1: the client must reject forbidden extensions in EncryptedExtensions with illegal_parameter. A supported_versions extension there is accepted."
-    },
-    {
       "test_id": "8446-bejcyb2cLf",
       "verdict": "FULLY_FAILED",
       "kind": "protocol-defect",
@@ -91,17 +69,6 @@
       ],
       "evidence": "Client outcome handshake-error with BR_ERR_UNEXPECTED after the handshake completed, in every case.",
       "explanation": "RFC 8446 section 4.6.3: a receiver of KeyUpdate must update its receiving keys and keep exchanging data. Certainly closes the connection instead of rekeying."
-    },
-    {
-      "test_id": "8446-guYpWN18yk",
-      "verdict": "FULLY_FAILED",
-      "kind": "protocol-defect",
-      "test": "Extensions.sendAdditionalExtension",
-      "signature": [
-        "success/Complete/None"
-      ],
-      "evidence": "Every failing case: the client completed the handshake (outcome success, TLS 1.3 state Complete) instead of terminating.",
-      "explanation": "RFC 8446 section 4.2: an extension response with no matching request must abort the handshake with unsupported_extension. Unsolicited extensions are ignored."
     },
     {
       "test_id": "8446-xhexdB876E",
