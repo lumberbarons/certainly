@@ -34,6 +34,8 @@ typedef struct {
     unsigned long bytes_received;
     unsigned long recv_calls;
     unsigned long send_calls;
+    unsigned long recv_data_calls;   /* recv calls that returned bytes */
+    unsigned long send_data_calls;   /* send calls that accepted bytes */
     unsigned long wouldblocks_injected;
     int           eof_seen;          /* orderly FIN from the peer */
     int           reset_seen;        /* connection reset or other hard error */
@@ -48,6 +50,18 @@ const host_transport_stats *host_transport_get_stats(void);
 
 /* Fail every NewPtrClear after `n` more successes; negative disables. */
 void host_alloc_fail_after(long n);
+
+/* Memory Manager use since the last reset. peak_bytes is the high-water mark
+ * of live_bytes, which carries over a reset so a leak stays visible. */
+typedef struct {
+    unsigned long allocations;
+    size_t        total_bytes;
+    size_t        live_bytes;
+    size_t        peak_bytes;
+} host_alloc_stats;
+
+void host_alloc_reset_stats(void);
+const host_alloc_stats *host_alloc_get_stats(void);
 
 /* ── Entropy ── */
 
