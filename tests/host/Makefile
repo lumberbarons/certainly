@@ -32,7 +32,7 @@ BEARSSL_LIB = libbearssl_host.a
 STUBS = stubs
 
 # Record-boundary tests; `make asan` runs them under ASan+UBSan.
-RECORD_TESTS = test_record test_record_handshake test_record_app
+RECORD_TESTS = test_record test_record_handshake test_record_app test_key_update
 RECORD_HDRS = record_helpers.h $(SRC)/tls13_record.h $(SRC)/tls13_record.c \
               $(SRC)/tls13_handshake.h
 SAN_FLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
@@ -88,6 +88,7 @@ test: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport t
 	./test_record
 	./test_record_handshake
 	./test_record_app
+	./test_key_update
 	./test_host_transport
 	./test_closure
 
@@ -108,6 +109,14 @@ test_record_app: test_record_app.c $(RECORD_HDRS) $(SRC)/certainly.c \
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) -I$(STUBS) -I$(BEARSSL_INC) -I$(SRC) \
 		-I../../include \
 		-o $@ test_record_app.c $(SRC)/tls13_record.c \
+		$(SRC)/tls13_handshake.c $(SRC)/tls13_keysched.c $(BEARSSL_LIB)
+
+test_key_update: test_key_update.c $(RECORD_HDRS) $(SRC)/certainly.c \
+                 $(SRC)/certainly_internal.h $(SRC)/tls13_handshake.c \
+                 $(SRC)/tls13_keysched.c $(BEARSSL_LIB) $(wildcard $(STUBS)/*.h)
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) -I$(STUBS) -I$(BEARSSL_INC) -I$(SRC) \
+		-I../../include \
+		-o $@ test_key_update.c $(SRC)/tls13_record.c \
 		$(SRC)/tls13_handshake.c $(SRC)/tls13_keysched.c $(BEARSSL_LIB)
 
 obj/certainly/%.o: $(SRC)/%.c $(wildcard $(SRC)/*.h) $(wildcard $(STUBS)/*.h)

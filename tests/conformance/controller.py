@@ -39,6 +39,15 @@ TEST_ID = re.compile(r"[A-Za-z0-9-]+")
 EXCLUSION_KINDS = {"optional-feature", "harness-limitation", "upstream-disabled", "out-of-scope"}
 # Client outcomes a profile may declare expected for a named test; a connect error never is.
 TOLERABLE_OUTCOMES = {"timeout", "certificate-error"}
+# Templates in which the suite sends a post-handshake message and then judges
+# everything the client sends afterwards. The usual client writes a payload as
+# soon as it connects, and whether the suite has read that record before it
+# looks for the client's reaction is a race, so these get a client that only
+# listens. Each is a property of the template, not of a profile, so a
+# single-test reproduction behaves like the full run.
+SILENT_CLIENT = {
+    "8446-Dy4H1oQ8bc",  # KeyUpdate.sendUnknownRequestMode
+}
 VERDICT_COUNTERS = {"STRICTLY_SUCCEEDED": "StrictlySucceededTests",
                     "CONCEPTUALLY_SUCCEEDED": "ConceptuallySucceededTests",
                     "PARTIALLY_FAILED": "PartiallyFailedTests", "FULLY_FAILED": "FullyFailedTests"}
@@ -210,8 +219,12 @@ class Attempts:
                         self.lock["server_name"], "--ca", str(self.anchors),
                         "--validation-time", str(self.lock["validation_time"]),
                         "--deadline-ms", str(int(self.args.attempt_timeout * 1000) - 500),
-                        "--mode", "data", "--send", str(self.directory / "payload.txt"),
-                        "--send-only", "--single-connection"]
+                        "--mode", "data"]
+                if self.test_id in SILENT_CLIENT:
+                    argv += ["--recv-until-close", "--single-connection"]
+                else:
+                    argv += ["--send", str(self.directory / "payload.txt"),
+                             "--send-only", "--single-connection"]
             else:
                 with socket.socket() as source:
                     source.bind(("127.0.0.1", 0))
@@ -229,7 +242,9 @@ class Attempts:
             self.stream = log.open("w")
             try:
                 with (self.directory / "payload.txt").open("rb") as payload:
-                    self.process = subprocess.Popen(argv, stdin=payload,
+                    # Only the reference client reads stdin; a silent one gets none.
+                    self.process = subprocess.Popen(argv, stdin=(subprocess.DEVNULL
+                                                    if self.test_id in SILENT_CLIENT else payload),
                                                     stdout=self.stream, stderr=self.stream,
                                                     start_new_session=True)
             except OSError:

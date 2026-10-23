@@ -138,6 +138,67 @@ static void test_handshake_secret(void)
     printf("  (Handshake keys derived — full verification requires cipher suite matching)\n");
 }
 
+/*
+ * Test: the KeyUpdate ratchet (RFC 8446 section 7.2). Expected values were
+ * computed independently with HMAC from the standard library:
+ *   next = HKDF-Expand-Label(secret, "traffic upd", "", Hash.length)
+ * then the key and IV are derived from next as for any traffic secret.
+ */
+static void test_traffic_update(void)
+{
+    static const struct {
+        const br_hash_class *hash;
+        size_t hash_len, key_len;
+        const char *secret, *key, *iv;
+    } cases[] = {
+        { &br_sha256_vtable, 32, 16,
+          "2cecd0a17506ef5fa73edc062d6e7b5397cf074ec1b4d8f99a120772932f0b45",
+          "05cdc7251fb9f925889f80ebc1fd385f",
+          "4ef68fed17d39b5f23bb4b30" },
+        { &br_sha256_vtable, 32, 32,
+          "2cecd0a17506ef5fa73edc062d6e7b5397cf074ec1b4d8f99a120772932f0b45",
+          "c690ede9a7525f64b759094f3bda2da3b5b52e50cffacd89a37bdf85affdd091",
+          "4ef68fed17d39b5f23bb4b30" },
+        { &br_sha384_vtable, 48, 16,
+          "401331b63e9d59f202e8f041042d9516f4cd7fa2e2ee14631d3b49fc340d7af3"
+          "7fc2c0c9f252d8036f81ec5b85cbe5db",
+          "f6e7ab99dfd7f9395206f21ed5577c1c",
+          "8478ffbe4f2e5450789775b3" },
+        { &br_sha384_vtable, 48, 32,
+          "401331b63e9d59f202e8f041042d9516f4cd7fa2e2ee14631d3b49fc340d7af3"
+          "7fc2c0c9f252d8036f81ec5b85cbe5db",
+          "eb354f3b48924ed78de34dd8aa6a6a0a51d857ddad1454d5cfa7b69f60712911",
+          "8478ffbe4f2e5450789775b3" },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        tls13_keysched ks;
+        unsigned char secret[64], key[32], iv[12];
+        unsigned char want_secret[64], want_key[32], want_iv[12];
+        char name[64];
+        size_t j;
+
+        tls13_ks_init(&ks, cases[i].hash);
+        for (j = 0; j < cases[i].hash_len; j++) secret[j] = (unsigned char)j;
+        hex_to_bytes(cases[i].secret, want_secret, cases[i].hash_len);
+        hex_to_bytes(cases[i].key, want_key, cases[i].key_len);
+        hex_to_bytes(cases[i].iv, want_iv, 12);
+
+        tls13_ks_update_traffic_secret(&ks, secret, cases[i].key_len, key, iv);
+
+        snprintf(name, sizeof(name), "traffic update hash=%zu secret",
+                 cases[i].hash_len);
+        assert_bytes(name, want_secret, secret, cases[i].hash_len);
+        snprintf(name, sizeof(name), "traffic update hash=%zu key=%zu",
+                 cases[i].hash_len, cases[i].key_len);
+        assert_bytes(name, want_key, key, cases[i].key_len);
+        snprintf(name, sizeof(name), "traffic update hash=%zu iv",
+                 cases[i].hash_len);
+        assert_bytes(name, want_iv, iv, 12);
+    }
+}
+
 int main(void)
 {
     printf("=== TLS 1.3 Key Schedule Tests ===\n\n");
@@ -145,6 +206,7 @@ int main(void)
     test_empty_hash();
     test_early_secret();
     test_handshake_secret();
+    test_traffic_update();
 
     printf("\n%d test(s) failed.\n", failures);
     return failures > 0 ? 1 : 0;

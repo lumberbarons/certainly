@@ -58,12 +58,23 @@ void tls13_ks_extract_master(tls13_keysched *ks);
 
 /* Derive client and server application traffic keys + IVs.
  * transcript_hash is Hash(ClientHello || ... || server Finished).
- * key_len is the AEAD key size (16 for AES-128, 32 for AES-256/ChaCha20). */
+ * key_len is the AEAD key size (16 for AES-128, 32 for AES-256/ChaCha20).
+ * The raw traffic secrets are copied to client_secret_out / server_secret_out
+ * when non-NULL; KeyUpdate ratchets from them. */
 void tls13_ks_derive_app_keys(tls13_keysched *ks,
                               const void *transcript_hash,
                               size_t key_len,
                               void *client_key, void *client_iv,
-                              void *server_key, void *server_iv);
+                              void *server_key, void *server_iv,
+                              void *client_secret_out,
+                              void *server_secret_out);
+
+/* KeyUpdate ratchet (RFC 8446 section 7.2). Replaces the traffic secret
+ * (hash_len bytes) with HKDF-Expand-Label(secret, "traffic upd", "",
+ * Hash.length) and derives the AEAD key and IV for the new secret. Call it
+ * once for each direction that changes keys. */
+void tls13_ks_update_traffic_secret(tls13_keysched *ks, void *secret,
+                                    size_t key_len, void *key, void *iv);
 
 /* Derive the Finished verification key from a traffic secret.
  * Used to compute/verify the Finished HMAC. */

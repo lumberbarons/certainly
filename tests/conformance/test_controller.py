@@ -484,6 +484,26 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(len({r["attempt"] for r in records}), 2)
         self.assertFalse(self.owner.errors)
 
+    def test_silent_templates_get_a_client_that_only_listens(self):
+        self.owner.launch()
+        usual = self.owner.records[0]["argv"]
+        self.assertIn("--send", usual)
+        self.assertIn("--send-only", usual)
+        self.owner.close()
+
+        self.owner.test_id = next(iter(c.SILENT_CLIENT))
+        self.owner.closed = False
+        self.owner.launch()
+        silent = self.owner.records[-1]["argv"]
+        self.assertIn("--recv-until-close", silent)
+        self.assertNotIn("--send", silent)
+        self.assertNotIn("--send-only", silent)
+
+    def test_silent_templates_are_valid_test_ids(self):
+        self.assertTrue(c.SILENT_CLIENT)
+        for test_id in c.SILENT_CLIENT:
+            self.assertRegex(test_id, c.TEST_ID)
+
     def test_stuck_client_is_killed_and_cannot_pass(self):
         self.client.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
         start = time.monotonic()

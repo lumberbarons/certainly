@@ -20,6 +20,7 @@ vm/
 tests/host/test_record
 tests/host/test_record_handshake
 tests/host/test_record_app
+tests/host/test_key_update
 tests/host/*.dSYM
 tests/host/test_entropy
 tests/host/obj/

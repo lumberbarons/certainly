@@ -215,8 +215,8 @@ Every summary keeps these apart, and upstream verdicts are copied verbatim:
 | `excluded` | Applicable but deliberately not run; the profile records why. |
 
 Exclusion kinds are `optional-feature`, `harness-limitation`, `out-of-scope`
-and `upstream-disabled`. A mandatory behaviour is never an exclusion: `KeyUpdate`
-handling stays in the profile and in the baseline as a protocol defect.
+and `upstream-disabled`. A mandatory behaviour is never an exclusion: when the library
+lacks one, it stays in the profile and in the baseline as a protocol defect.
 
 A run where no template produced a verdict exits with the harness status even if
 everything was inapplicable. Some templates, such as the ClientHello content
@@ -231,6 +231,13 @@ that declaration, a certificate error or timeout fails the harness, since a
 broken fixture looks the same as a correct rejection. A tolerated certificate
 rejection must still happen at the Certificate message. Connection errors are
 never tolerated.
+
+The client normally writes a small payload as soon as it connects. For templates
+where the suite sends a post-handshake message and then judges everything the
+client sends (`SILENT_CLIENT` in `controller.py`), whether the suite has read
+that payload before it looks at the client's reaction is a race, which made the
+verdict vary between runs. Those templates get a client that sends nothing and
+only listens.
 
 #### Baseline
 

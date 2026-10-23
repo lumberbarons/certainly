@@ -459,6 +459,25 @@ static int tls13_flush_application(MacTLS_Context *ctx)
     return 0;
 }
 
+/*
+ * Move the queued KeyUpdate reply into the send buffer once it is free. Any
+ * record already there was encrypted under the old keys and has to leave
+ * first, so the reply is never put ahead of it.
+ */
+static void tls13_queue_key_update(MacTLS_Context *ctx)
+{
+    tls13_hs_ctx *hs = &ctx->hs13;
+
+    if (hs->key_update_out_len == 0 ||
+        ctx->tls13_send_offset < ctx->tls13_send_len) {
+        return;
+    }
+    memcpy(ctx->tls13_send_buf, hs->key_update_out, hs->key_update_out_len);
+    ctx->tls13_send_offset = 0;
+    ctx->tls13_send_len = hs->key_update_out_len;
+    hs->key_update_out_len = 0;
+}
+
 static bool transport_peer_gone(const MacTLS_Context *ctx)
 {
     return ctx->transport->ordRelReceived ||
@@ -893,8 +912,13 @@ MacTLS_State MacTLS_Pump(MacTLS_Context *ctx)
      * TLS 1.3 connected state — process incoming records.
      */
     if (ctx->tls13_active && ctx->state == kMacTLS_Connected) {
+        tls13_queue_key_update(ctx);
         if (tls13_flush_application(ctx) < 0) return ctx->state;
         tls13_recv_records(ctx);
+        if (ctx->state == kMacTLS_Connected) {
+            tls13_queue_key_update(ctx);
+            tls13_flush_application(ctx);
+        }
         return ctx->state;
     }
 
@@ -1006,6 +1030,7 @@ void MacTLS_Close(MacTLS_Context *ctx)
             alert[1] = 0;  /* close_notify */
 
             if (ctx->tls13_send_offset == ctx->tls13_send_len &&
+                ctx->hs13.key_update_out_len == 0 &&
                 tls13_record_encrypt(&ctx->hs13.write_ctx,
                                      alert, 2,
                                      TLS13_CT_ALERT,
@@ -1070,6 +1095,8 @@ int MacTLS_Write(MacTLS_Context *ctx, const void *data, size_t len)
         size_t ct_len;
         int ret;
         if (ctx->tls13_send_offset < ctx->tls13_send_len) return 0;
+        /* The KeyUpdate reply must go out under the old keys first. */
+        if (ctx->hs13.key_update_out_len > 0) return 0;
         if (len == 0) return 0;
         if (len > 16384) len = 16384;
         ret = tls13_record_encrypt(&ctx->hs13.write_ctx, data, len,
