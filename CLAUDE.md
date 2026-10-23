@@ -55,6 +55,7 @@ unknown" in source files under `src/` or `examples/`, that is expected
 | `tests/host/`         | Host-side unit tests. Add new ones to the Makefile. |
 | `tests/host/platform/`| Native stand-ins for Open Transport, `NewPtrClear`, `TickCount` and OS entropy, used by the conformance client. Test-only. |
 | `tests/conformance/`  | Native TLS client, fixtures and checks against controlled peers; see its README. |
+| `tests/perf/`         | Native performance harness: copy volume, instructions per call, longest pump, heap. Runs any revision; see its README. |
 | `specs/`              | Feature specs with task lists. |
 | `docs/superpowers/`   | Design specs and implementation plans (historical context). |
 
@@ -113,6 +114,10 @@ explicitly rejected to keep the transcript hash logic simple.
   peers. Run it after changes to `src/certainly.c`, the handshake, record
   or entropy code. Needs OpenSSL with `s_server -ciphersuites` and `uv`;
   see `tests/conformance/README.md`.
+- **Performance harness** (`tests/perf/run-perf.sh`) — run it before and
+  after changes to the receive, send or handshake paths and compare with
+  `tests/perf/compare.py`. It reports work the library does, not speed on
+  the target; see its README for what carries over.
 - **Emulator smoke tests** — for changes to the OT transport, handshake
   driver, or example apps, build with Retro68 and exercise the resulting
   `.dsk` in SheepShaver or QEMU. The Postman example is the most

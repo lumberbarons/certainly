@@ -20,6 +20,7 @@
 static const unsigned char *feed;
 static size_t feed_len;
 static size_t feed_pos;
+static size_t feed_chunk;   /* cap on bytes per recv; 0 = unlimited */
 
 OTTransport *ot_transport_create(const char *h, uint16_t p) { (void)h; (void)p; return NULL; }
 OTTransportState ot_transport_pump(OTTransport *t) { (void)t; return kOTTransport_Connected; }
@@ -32,6 +33,7 @@ int ot_transport_recv(OTTransport *t, void *buf, size_t len)
     size_t n = feed_len - feed_pos;
     (void)t;
     if (n > len) n = len;
+    if (feed_chunk != 0 && n > feed_chunk) n = feed_chunk;
     memcpy(buf, feed + feed_pos, n);
     feed_pos += n;
     return (int)n;
@@ -98,6 +100,7 @@ static void set_feed(const unsigned char *b, size_t n)
     feed = b;
     feed_len = n;
     feed_pos = 0;
+    feed_chunk = 0;
 }
 
 /* Full 16384-byte payloads, with and without padding, deliver intact. */
@@ -219,6 +222,84 @@ static void test_good_then_forged(size_t s)
     free_connection(ctx);
 }
 
+
+/*
+ * A long run of small records, more than the receive buffer holds, with
+ * change_cipher_spec records between them, arriving in pieces of every
+ * awkward size. The bytes must come out exactly as sent: records are
+ * consumed by advancing through the buffer, so a record cut at the end of
+ * the buffer, or a header split across reads, must survive being moved to
+ * the front before the next read.
+ */
+static void test_small_records_in_pieces(size_t s)
+{
+    static const size_t chunks[] = { 0, 1, 7, 100, 1460 };
+    enum { RECORDS = 200 };
+    size_t ci;
+
+    for (ci = 0; ci < sizeof(chunks) / sizeof(chunks[0]); ci++) {
+        MacTLS_Context *ctx = new_connection(s);
+        tls13_record_ctx tx;
+        unsigned char *stream = (unsigned char *)malloc(RECORDS * 400);
+        unsigned char *expect = (unsigned char *)malloc(RECORDS * 400);
+        unsigned char *got = (unsigned char *)malloc(RECORDS * 400);
+        unsigned char content[320], sealed[400];
+        size_t stream_len = 0, expect_len = 0, got_len = 0;
+        size_t i, k, pumps = 0;
+
+        init_ctx(&tx, s);
+        for (i = 0; i < RECORDS; i++) {
+            size_t len = 1 + (i * 37) % 300;
+            size_t sealed_len, wire_len;
+            unsigned char *wire;
+
+            for (k = 0; k < len; k++) content[k] = (unsigned char)(expect_len + k);
+            sealed_len = seal_record(&tx, content, len,
+                                     TLS13_CT_APPLICATION_DATA, 0, sealed);
+            wire = wire_record(sealed, sealed_len, &wire_len);
+            memcpy(stream + stream_len, wire, wire_len);
+            stream_len += wire_len;
+            memcpy(expect + expect_len, content, len);
+            expect_len += len;
+            free(wire);
+
+            if (i % 17 == 0) {
+                static const unsigned char ccs[] = { 1 };
+
+                wire = wire_record(ccs, 1, &wire_len);
+                wire[0] = TLS13_CT_CHANGE_CIPHER_SPEC;
+                memcpy(stream + stream_len, wire, wire_len);
+                stream_len += wire_len;
+                free(wire);
+            }
+        }
+        set_feed(stream, stream_len);
+        feed_chunk = chunks[ci];
+
+        while (got_len < expect_len && pumps < 1000000) {
+            unsigned char buf[512];
+            MacTLS_State st = MacTLS_Pump(ctx);
+            int n;
+
+            pumps++;
+            if (st != kMacTLS_Connected) break;
+            while ((n = MacTLS_Read(ctx, buf, sizeof(buf))) > 0) {
+                memcpy(got + got_len, buf, (size_t)n);
+                got_len += (size_t)n;
+            }
+        }
+        CHECK(got_len == expect_len && memcmp(got, expect, expect_len) == 0,
+              "%s chunk=%zu: got %zu of %zu bytes, or they differ (state=%d error=%d)",
+              suites[s].name, chunks[ci], got_len, expect_len, ctx->state,
+              ctx->error);
+        CHECK(ctx->tls13_recv_len == 0, "%s chunk=%zu: %zu bytes left in recv_buf",
+              suites[s].name, chunks[ci], ctx->tls13_recv_len);
+
+        free(got); free(expect); free(stream);
+        free_connection(ctx);
+    }
+}
+
 int main(void)
 {
     size_t s;
@@ -226,6 +307,7 @@ int main(void)
         test_legal_full_record(s);
         test_rejected_records(s);
         test_good_then_forged(s);
+        test_small_records_in_pieces(s);
         printf("done: %s\n", suites[s].name);
     }
     if (failures) {

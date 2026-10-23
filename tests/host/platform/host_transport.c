@@ -243,6 +243,7 @@ int ot_transport_send(OTTransport *t, const void *buf, size_t len)
         return -1;
     }
     g_stats.bytes_sent += (unsigned long)n;
+    if (n > 0) g_stats.send_data_calls++;
     return (int)n;
 }
 
@@ -264,6 +265,7 @@ int ot_transport_recv(OTTransport *t, void *buf, size_t len)
     n = recv(fd_of(t), buf, len, 0);
     if (n > 0) {
         g_stats.bytes_received += (unsigned long)n;
+        g_stats.recv_data_calls++;
         return (int)n;
     }
     if (n == 0) {

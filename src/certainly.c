@@ -502,6 +502,19 @@ static bool tls13_handle_alert(MacTLS_Context *ctx,
     return true;
 }
 
+/* True when the unread bytes hold at least one whole record, or a header
+ * the record loop will reject without waiting for more. */
+static bool tls13_whole_record_buffered(const MacTLS_Context *ctx)
+{
+    const unsigned char *p = ctx->tls13_recv_buf + ctx->tls13_recv_off;
+    size_t record_len;
+
+    if (ctx->tls13_recv_len < 5) return false;
+    record_len = (size_t)((p[3] << 8) | p[4]);
+    return record_len > TLS13_MAX_CIPHERTEXT ||
+           ctx->tls13_recv_len >= 5 + record_len;
+}
+
 static void tls13_recv_records(MacTLS_Context *ctx)
 {
     int n;
@@ -512,15 +525,29 @@ static void tls13_recv_records(MacTLS_Context *ctx)
     if (ctx->tls13_app_offset < ctx->tls13_app_len) return;
 
     /*
-     * Step 1: Read raw bytes from OT transport into recv_buf.
+     * Step 1: Read raw bytes from OT transport into recv_buf, but only once
+     * the buffered records are used up. Consuming a record just advances
+     * recv_off, so a buffer full of small records is not shifted down after
+     * each one; what is left then is at most a partial record, which is
+     * slid to the front so the read has the whole buffer to fill.
      * If the peer has closed but we have buffered data, we still
      * need to process it below — don't return early.
      */
-    if (ctx->tls13_recv_len < sizeof(ctx->tls13_recv_buf)) {
-        size_t space = sizeof(ctx->tls13_recv_buf) - ctx->tls13_recv_len;
-        n = ot_transport_recv(ctx->transport,
-                              ctx->tls13_recv_buf + ctx->tls13_recv_len,
-                              space);
+    if (!tls13_whole_record_buffered(ctx)) {
+        size_t space;
+
+        if (ctx->tls13_recv_off > 0) {
+            if (ctx->tls13_recv_len > 0) {
+                memmove(ctx->tls13_recv_buf,
+                        ctx->tls13_recv_buf + ctx->tls13_recv_off,
+                        ctx->tls13_recv_len);
+            }
+            ctx->tls13_recv_off = 0;
+        }
+        space = sizeof(ctx->tls13_recv_buf) - ctx->tls13_recv_len;
+        n = space > 0 ? ot_transport_recv(ctx->transport,
+                                          ctx->tls13_recv_buf +
+                                          ctx->tls13_recv_len, space) : 0;
         if (n > 0) {
             ctx->tls13_recv_len += n;
         } else if (n < 0) {
@@ -543,6 +570,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
      * Keep processing as long as we have complete records.
      */
     while (ctx->tls13_recv_len >= 5) {
+        const unsigned char *record;
         uint16_t record_len;
         uint8_t record_type;
         size_t total_record;
@@ -551,9 +579,9 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         uint8_t inner_ct;
         int ret;
 
-        record_type = ctx->tls13_recv_buf[0];
-        record_len = (uint16_t)((ctx->tls13_recv_buf[3] << 8) |
-                                 ctx->tls13_recv_buf[4]);
+        record = ctx->tls13_recv_buf + ctx->tls13_recv_off;
+        record_type = record[0];
+        record_len = (uint16_t)((record[3] << 8) | record[4]);
         /* A record over the protocol limit can never be decrypted (and
          * would not fit in recv_buf, stalling the connection). */
         if (record_len > TLS13_MAX_CIPHERTEXT) {
@@ -574,9 +602,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
          */
         if (record_type == TLS13_CT_CHANGE_CIPHER_SPEC) {
             /* Consume the record and continue */
-            memmove(ctx->tls13_recv_buf,
-                    ctx->tls13_recv_buf + total_record,
-                    ctx->tls13_recv_len - total_record);
+            ctx->tls13_recv_off += total_record;
             ctx->tls13_recv_len -= total_record;
             continue;
         }
@@ -609,7 +635,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
 
         /* Decrypt the record */
         ret = tls13_record_decrypt(&ctx->hs13.read_ctx,
-                                   ctx->tls13_recv_buf + 5, record_len,
+                                   record + 5, record_len,
                                    decrypted, sizeof(ctx->hs13.plain_buf),
                                    &dec_len, &inner_ct);
         if (ret != 0) {
@@ -619,9 +645,7 @@ static void tls13_recv_records(MacTLS_Context *ctx)
         }
 
         /* Consume the record from recv_buf */
-        memmove(ctx->tls13_recv_buf,
-                ctx->tls13_recv_buf + total_record,
-                ctx->tls13_recv_len - total_record);
+        ctx->tls13_recv_off += total_record;
         ctx->tls13_recv_len -= total_record;
 
         /*

@@ -25,3 +25,4 @@ tests/host/test_entropy
 tests/host/obj/
 tests/host/test_host_transport
 tests/conformance/__pycache__/
+tests/perf/__pycache__/

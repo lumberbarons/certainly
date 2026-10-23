@@ -57,7 +57,8 @@ BEARSSL_TOOLS = ../../bearssl/tools
 
 .PHONY: all clean clean-client test asan conformance-client conformance-check \
         conformance-anvil conformance-anvil-reference conformance-runner-check \
-        conformance-anvil-check-profile conformance-anvil-wide conformance-anvil-baseline
+        conformance-anvil-check-profile conformance-anvil-wide conformance-anvil-baseline \
+        perf-client
 
 all: test_keysched test_http test_entropy $(RECORD_TESTS) test_host_transport test_closure
 
@@ -142,6 +143,51 @@ $(CONF_OUT)/certainly_client: $(CONF)/certainly_client.c $(CONF)/trust_anchors.c
 
 clean-client:
 	rm -rf obj/certainly obj/platform $(CONF_OUT)/certainly_client
+
+# Performance harness client (tests/perf). Builds the library tree named by
+# PERF_TREE (default: this one) so any revision can be measured with the
+# same client and platform shims; run it through tests/perf/run-perf.sh.
+# The tree's src/ is compiled with perf_memtrack.h force-included, which
+# counts the bytes the library copies itself.
+PERF = ../perf
+PERF_TREE ?= ../..
+PERF_LABEL ?= current
+PERF_OUT = ../../build/perf/$(PERF_LABEL)
+PERF_SRC = $(PERF_TREE)/src
+PERF_TRUSTED := $(shell grep -c MacTLS_SetEntropyProvider $(PERF_TREE)/include/certainly.h)
+PERF_LIB_SRCS = certainly tls13_handshake tls13_keysched tls13_record ca_roots
+PERF_FLAGS = -DHOST_PLATFORM -I$(STUBS) -I$(BEARSSL_INC) -I$(PERF_SRC) \
+             -I$(PERF_TREE)/include -I$(PLATFORM)
+ifneq ($(PERF_TRUSTED),0)
+PERF_LIB_SRCS += entropy
+PERF_FLAGS += -DPERF_TRUSTED_ENTROPY
+else
+PERF_EXTRA_OBJS = $(PERF_OUT)/obj/perf_legacy_entropy.o
+endif
+PERF_LIB_OBJS = $(patsubst %,$(PERF_OUT)/obj/%.o,$(PERF_LIB_SRCS))
+PERF_PLATFORM_OBJS = $(patsubst %,$(PERF_OUT)/obj/platform_%.o,host_ticks host_alloc host_entropy host_transport)
+
+perf-client: $(PERF_OUT)/perf_client
+
+$(PERF_OUT)/obj/%.o: $(PERF_SRC)/%.c $(wildcard $(PERF_SRC)/*.h) $(PERF)/perf_memtrack.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(PERF_FLAGS) -include $(PERF)/perf_memtrack.h -c -o $@ $<
+
+$(PERF_OUT)/obj/platform_%.o: $(PLATFORM)/%.c $(PLATFORM)/host_platform.h
+	@mkdir -p $(dir $@)
+	$(CC) -Wall -Wextra -O2 -std=gnu99 $(PERF_FLAGS) -c -o $@ $<
+
+$(PERF_OUT)/obj/perf_%.o: $(PERF)/perf_%.c $(PERF)/perf_memtrack.h
+	@mkdir -p $(dir $@)
+	$(CC) -Wall -Wextra -O2 -std=gnu99 $(PERF_FLAGS) -c -o $@ $<
+
+$(PERF_OUT)/perf_client: $(PERF)/perf_client.c $(CONF)/trust_anchors.c \
+                         $(PERF_LIB_OBJS) $(PERF_PLATFORM_OBJS) $(PERF_EXTRA_OBJS) \
+                         $(PERF_OUT)/obj/perf_memtrack.o $(BEARSSL_LIB)
+	$(CC) -Wall -Wextra -O2 -std=gnu99 $(PERF_FLAGS) -I$(CONF) -I$(PERF) -o $@ \
+		$(PERF)/perf_client.c $(CONF)/trust_anchors.c \
+		$(PERF_LIB_OBJS) $(PERF_PLATFORM_OBJS) $(PERF_EXTRA_OBJS) \
+		$(PERF_OUT)/obj/perf_memtrack.o $(BEARSSL_LIB)
 
 conformance-check: conformance-client
 	$(CONF)/check-client.sh
