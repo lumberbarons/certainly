@@ -72,11 +72,14 @@ struct MacTLS_Context {
      * stage incoming encrypted records and decrypted plaintext.
      *
      * recv_buf: holds raw bytes from OT transport, consumed as complete
-     *           TLS records are parsed and decrypted.
+     *           TLS records are parsed and decrypted. The unread bytes are
+     *           recv_len bytes starting at recv_off; the handshake driver
+     *           always works from offset 0.
      * app_buf:  holds decrypted application data ready for MacTLS_Read().
      */
     unsigned char   tls13_recv_buf[TLS13_MAX_RECORD_SIZE];
-    size_t          tls13_recv_len;               /* bytes currently in recv_buf */
+    size_t          tls13_recv_len;               /* unread bytes in recv_buf */
+    size_t          tls13_recv_off;               /* where they start */
     unsigned char   tls13_app_buf[TLS13_MAX_PLAINTEXT]; /* decrypted app data */
     size_t          tls13_app_len;                /* bytes in app_buf */
     size_t          tls13_app_offset;             /* read cursor in app_buf */
