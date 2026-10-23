@@ -343,14 +343,35 @@ void tls13_ks_derive_app_keys(tls13_keysched *ks,
                               const void *transcript_hash,
                               size_t key_len,
                               void *client_key, void *client_iv,
-                              void *server_key, void *server_iv)
+                              void *server_key, void *server_iv,
+                              void *client_secret_out,
+                              void *server_secret_out)
 {
     derive_traffic_keys(ks, transcript_hash,
                         "c ap traffic", sizeof("c ap traffic") - 1,
                         "s ap traffic", sizeof("s ap traffic") - 1,
                         key_len,
                         client_key, client_iv, server_key, server_iv,
-                        NULL, NULL);
+                        client_secret_out, server_secret_out);
+}
+
+void tls13_ks_update_traffic_secret(tls13_keysched *ks, void *secret,
+                                    size_t key_len, void *key, void *iv)
+{
+    unsigned char next[64];
+    br_hmac_key_context kc;
+
+    hkdf_expand_label(ks->hash, secret, ks->hash_len,
+                      "traffic upd", sizeof("traffic upd") - 1, NULL, 0,
+                      next, ks->hash_len);
+    memcpy(secret, next, ks->hash_len);
+
+    br_hmac_key_init(&kc, ks->hash, next, ks->hash_len);
+    hkdf_expand_label_key(&kc, "key", sizeof("key") - 1, NULL, 0, key, key_len);
+    hkdf_expand_label_key(&kc, "iv", sizeof("iv") - 1, NULL, 0, iv, 12);
+
+    memset(&kc, 0, sizeof(kc));
+    memset(next, 0, sizeof(next));
 }
 
 void tls13_ks_derive_finished_key(tls13_keysched *ks,

@@ -1914,7 +1914,8 @@ static tls13_hs_result tls13_state_recv_finished(
     tls13_ks_derive_app_keys(&hs->ks, app_transcript_hash,
                              key_len,
                              client_key, client_iv,
-                             server_key, server_iv);
+                             server_key, server_iv,
+                             hs->client_app_secret, hs->server_app_secret);
 
     /*
      * Install server application keys for reading.
@@ -2113,6 +2114,64 @@ static tls13_hs_result tls13_state_send_finished(tls13_hs_ctx *hs)
 
 /* ── Post-Handshake Message Handling ── */
 
+#define TLS13_KU_UPDATE_NOT_REQUESTED 0
+#define TLS13_KU_UPDATE_REQUESTED     1
+
+/* The reply is sealed here, while the write keys are still the old ones: the
+ * peer needs it to be the last record under them (RFC 8446 section 4.6.3). */
+static tls13_hs_result tls13_handle_key_update(tls13_hs_ctx *hs,
+                                               uint8_t request_update)
+{
+    unsigned char key[32], iv[12];
+    size_t key_len;
+
+    if (request_update != TLS13_KU_UPDATE_NOT_REQUESTED &&
+        request_update != TLS13_KU_UPDATE_REQUESTED) {
+        hs->error = BR_ERR_BAD_PARAM;
+        return kTLS13_Error;
+    }
+
+    key_len = hs->read_ctx.key_len;
+    tls13_ks_update_traffic_secret(&hs->ks, hs->server_app_secret,
+                                   key_len, key, iv);
+    tls13_record_init(&hs->read_ctx, key, key_len, iv, hs->cipher_suite);
+
+    /*
+     * Several requests received before we get to send anything are answered
+     * by one reply (RFC 8446 section 4.6.3), so a reply that is still
+     * queued also covers this request.
+     */
+    if (request_update == TLS13_KU_UPDATE_REQUESTED &&
+        hs->key_update_out_len == 0) {
+        static const unsigned char msg[4 + 1] = {
+            TLS13_HT_KEY_UPDATE, 0, 0, 1, TLS13_KU_UPDATE_NOT_REQUESTED
+        };
+        size_t sealed_len;
+
+        if (tls13_record_encrypt(&hs->write_ctx, msg, sizeof(msg),
+                                 TLS13_CT_HANDSHAKE,
+                                 hs->key_update_out + TLS13_RECORD_HEADER_SIZE,
+                                 &sealed_len) != 0) {
+            hs->error = BR_ERR_BAD_PARAM;
+            secure_wipe(key, sizeof(key));
+            return kTLS13_Error;
+        }
+        hs->key_update_out[0] = TLS13_CT_APPLICATION_DATA;
+        hs->key_update_out[1] = 0x03;
+        hs->key_update_out[2] = 0x03;
+        put_u16(hs->key_update_out + 3, (uint16_t)sealed_len);
+        hs->key_update_out_len = TLS13_RECORD_HEADER_SIZE + sealed_len;
+
+        tls13_ks_update_traffic_secret(&hs->ks, hs->client_app_secret,
+                                       key_len, key, iv);
+        tls13_record_init(&hs->write_ctx, key, key_len, iv, hs->cipher_suite);
+    }
+
+    secure_wipe(key, sizeof(key));
+    secure_wipe(iv, sizeof(iv));
+    return kTLS13_OK;
+}
+
 /*
  * Handle post-handshake messages received after the handshake completes.
  *
@@ -2122,57 +2181,76 @@ static tls13_hs_result tls13_state_send_finished(tls13_hs_ctx *hs)
  *   - NewSessionTicket (type 4): Session resumption data. We don't
  *     support session resumption, so these are silently discarded.
  *
- *   - KeyUpdate (type 24): Requests re-keying. We don't support
- *     post-handshake key updates, so we treat this as a fatal error
- *     (connection close). In practice, most servers don't send KeyUpdate
- *     within the first few requests.
+ *   - KeyUpdate (type 24): The peer switched its sending keys. We switch
+ *     our receiving keys to match and, if it asked (update_requested),
+ *     answer with a KeyUpdate of our own and switch our sending keys.
+ *
+ * A record may carry several messages, but a KeyUpdate must be the last
+ * one: the keys change at that point and nothing after it was protected
+ * with them.
  *
  * Parameters:
  *   data     — decrypted record payload (inner content type already stripped)
  *   data_len — length of the decrypted payload
  *
  * Returns:
- *   kTLS13_OK    — message handled (e.g., NewSessionTicket discarded)
- *   kTLS13_Error — unrecoverable error (e.g., KeyUpdate or unknown type)
+ *   kTLS13_OK    — messages handled
+ *   kTLS13_Error — unrecoverable error (malformed or illegal message,
+ *                  unknown type)
  */
 tls13_hs_result tls13_handle_post_handshake(tls13_hs_ctx *hs,
                                             const unsigned char *data,
                                             size_t data_len)
 {
-    uint8_t msg_type;
+    size_t off = 0;
 
     if (data_len < 1) {
         hs->error = BR_ERR_BAD_PARAM;
         return kTLS13_Error;
     }
 
-    msg_type = data[0];
+    while (off < data_len) {
+        size_t body_len;
 
-    switch (msg_type) {
-    case TLS13_HT_NEW_SESSION_TICKET:
-        /*
-         * NewSessionTicket — silently discard.
-         * We don't support session resumption (PSK), so there's nothing
-         * to store. The server sends these speculatively; ignoring them
-         * is perfectly valid per RFC 8446.
-         */
-        return kTLS13_OK;
+        if (data_len - off < 4) {
+            hs->error = BR_ERR_BAD_LENGTH;
+            return kTLS13_Error;
+        }
+        body_len = ((size_t)data[off + 1] << 16) |
+                   ((size_t)data[off + 2] << 8) | data[off + 3];
+        if (body_len > data_len - off - 4) {
+            hs->error = BR_ERR_BAD_LENGTH;
+            return kTLS13_Error;
+        }
 
-    case TLS13_HT_KEY_UPDATE:
-        /*
-         * KeyUpdate — treat as connection close.
-         * Supporting key updates would require re-deriving traffic keys
-         * mid-connection. For a simple REST client making short-lived
-         * connections, this is unnecessary complexity.
-         */
-        hs->error = BR_ERR_UNEXPECTED;
-        return kTLS13_Error;
+        switch (data[off]) {
+        case TLS13_HT_NEW_SESSION_TICKET:
+            /*
+             * We don't support session resumption (PSK), so there's
+             * nothing to store. The server sends these speculatively;
+             * ignoring them is perfectly valid per RFC 8446.
+             */
+            break;
 
-    default:
-        /* Unknown post-handshake message type */
-        hs->error = BR_ERR_UNEXPECTED;
-        return kTLS13_Error;
+        case TLS13_HT_KEY_UPDATE:
+            if (body_len != 1 || off + 4 + body_len != data_len) {
+                hs->error = BR_ERR_BAD_LENGTH;
+                return kTLS13_Error;
+            }
+            if (tls13_handle_key_update(hs, data[off + 4]) != kTLS13_OK) {
+                return kTLS13_Error;
+            }
+            break;
+
+        default:
+            /* Unknown post-handshake message type */
+            hs->error = BR_ERR_UNEXPECTED;
+            return kTLS13_Error;
+        }
+
+        off += 4 + body_len;
     }
+    return kTLS13_OK;
 }
 
 /* ── Handshake State Machine ── */

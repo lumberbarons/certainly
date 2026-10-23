@@ -107,6 +107,23 @@ typedef struct {
     unsigned char       server_hs_secret[64];
 
     /*
+     * Application traffic secrets. They outlive the handshake because a
+     * KeyUpdate ratchets each direction from its current secret.
+     */
+    unsigned char       client_app_secret[64];
+    unsigned char       server_app_secret[64];
+
+    /*
+     * Our KeyUpdate reply, already encrypted under the pre-update write keys
+     * and framed as a record. The pump moves it into the send buffer once
+     * that is free; until then no new application data may be encrypted, or
+     * it would overtake the reply on the wire. Empty when the length is 0.
+     */
+    unsigned char       key_update_out[TLS13_RECORD_HEADER_SIZE + 4 + 1 + 1 +
+                                       TLS13_TAG_SIZE];
+    size_t              key_update_out_len;
+
+    /*
      * Buffer for handshake messages (incoming and outgoing).
      *
      * Was 4096, which silently overflowed for Certificate messages
@@ -204,7 +221,9 @@ void tls13_handshake_init(tls13_hs_ctx *hs);
 
 /* Handle post-handshake messages (NewSessionTicket, KeyUpdate).
  * Called when an encrypted record with inner content type handshake (22)
- * is received during the application data phase. */
+ * is received during the application data phase. A KeyUpdate switches the
+ * read keys and, when the peer asks for it, queues our own KeyUpdate in
+ * hs->key_update_out and switches the write keys. */
 tls13_hs_result tls13_handle_post_handshake(tls13_hs_ctx *hs,
                                             const unsigned char *data,
                                             size_t data_len);
